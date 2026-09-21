@@ -141,7 +141,7 @@ def appliquer_mise_a_jour(infos, fenetre):
 
         # 3. Nouveaux composants Python si la liste a changé.
         if _lire_texte(os.path.join(APP, "requirements.txt")) != anciens_besoins:
-            fenetre.etat("Installation des nouveaux composants…", 90)
+            fenetre.etat("Installation des nouveaux composants (1 à 3 min, ne ferme rien)…", -1)
             r = subprocess.run([_python("python.exe"), "-m", "pip", "install", "-q", "--disable-pip-version-check",
                                 "-r", os.path.join(APP, "requirements.txt")], creationflags=NO_WIN, cwd=APP)
             if r.returncode != 0:
@@ -181,7 +181,25 @@ def _supprimer(chemin):
         pass
 
 
+def calmer_ollama():
+    """L'application Ollama ouvre une fenêtre « Create an account » (et se relance à chaque démarrage
+    du PC). Studio Clips n'a besoin que du moteur, invisible : on ferme l'appli et son démarrage auto."""
+    try:
+        demarrage = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs",
+                                 "Startup", "Ollama.lnk")
+        if os.path.exists(demarrage):
+            os.remove(demarrage)
+        liste = subprocess.run(["tasklist", "/fi", "imagename eq ollama app.exe", "/fo", "csv", "/nh"],
+                               capture_output=True, text=True, creationflags=NO_WIN).stdout
+        if "ollama app.exe" in liste.lower():
+            subprocess.run(["taskkill", "/f", "/im", "ollama app.exe"], capture_output=True, creationflags=NO_WIN)
+            time.sleep(1.5)   # le moteur lancé par l'appli s'arrête avec elle : on le relance juste après
+    except Exception as e:  # noqa: BLE001 — jamais bloquant
+        journal(f"calmer ollama : {e}")
+
+
 def demarrer_ollama():
+    calmer_ollama()
     try:
         urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2).close()
         return
@@ -204,6 +222,28 @@ def appli_deja_ouverte():
             return bool(json.load(r).get("studio"))
     except Exception:  # noqa: BLE001
         return False
+
+
+def fermer_pour_mise_a_jour():
+    """L'appli tourne encore (fenêtre fermée depuis peu, ou relancée) et une mise à jour attend :
+    on lui demande de s'arrêter, sauf si elle est en plein travail. Relancer = mettre à jour."""
+    if "OWNER/" in URL_VERSION:
+        return False
+    try:
+        infos = json.loads(lire_avec_delai(URL_VERSION, 6))
+        if not plus_recente(infos.get("version", "0"), version_locale()):
+            return False
+        with open(os.path.join(APP, ".studio-port")) as f:
+            port = int(f.read().strip())
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/quitter", data=b"", method="POST")
+        urllib.request.urlopen(req, timeout=3).close()
+    except Exception:  # noqa: BLE001 — travail en cours (409), hors ligne… : on ne touche à rien
+        return False
+    for _ in range(20):   # on attend qu'elle soit vraiment arrêtée
+        time.sleep(0.5)
+        if not appli_deja_ouverte():
+            return True
+    return False
 
 
 def ouvrir_appli():
@@ -275,7 +315,11 @@ class Fenetre:
             self._a_faire = None
             if texte:
                 self.texte.config(text=texte)
-            if pct is not None:
+            if pct == -1:   # durée inconnue : barre animée, pour montrer que ça travaille
+                if str(self.barre["mode"]) != "indeterminate":
+                    self.barre.config(mode="indeterminate")
+                    self.barre.start(12)
+            elif pct is not None:
                 if str(self.barre["mode"]) != "determinate":
                     self.barre.stop()
                     self.barre.config(mode="determinate")
@@ -313,8 +357,8 @@ def main():
         attendre_fin_processus(sys.argv[sys.argv.index("--apres-fermeture") + 1])
     threading.Thread(target=demarrer_ollama, daemon=True).start()
 
-    if appli_deja_ouverte():
-        ouvrir_appli()   # l'appli tourne : elle rouvre juste sa fenêtre, on ne met rien à jour sous ses pieds
+    if appli_deja_ouverte() and not fermer_pour_mise_a_jour():
+        ouvrir_appli()   # l'appli tourne (et travaille, ou rien à mettre à jour) : elle rouvre juste sa fenêtre
         return
 
     def travail(fenetre):

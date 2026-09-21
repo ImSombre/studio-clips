@@ -101,12 +101,19 @@ async function chargerProjets(essai = 0) {
       <div class="projet-vignette" style="${p.premier ? `background-image:url('/miniature/${p.id}/${p.premier}')` : ""}"></div>
       <div style="min-width:0">
         <div class="projet-nom">${echap(p.nom)}</div>
-        <div class="projet-infos"><span class="badge ${p.etat}">${etats[p.etat] || p.etat}</span>
+        <div class="projet-infos"><span class="badge ${p.etat}">${p.progression ? `${p.progression.pct} %` : (etats[p.etat] || p.etat)}</span>
           <span class="mono">${p.clips} clip${p.clips > 1 ? "s" : ""}${p.exportes ? ` · ${p.exportes} exporté${p.exportes > 1 ? "s" : ""}` : ""}</span>
           <span>${new Date(p.cree).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}</span></div>
+        ${p.progression ? `<div class="projet-progression"><i style="width:${p.progression.pct}%"></i></div>
+          <div class="projet-etape">${echap(p.progression.etape)}${p.progression.message ? " — " + echap(p.progression.message) : ""}</div>` : ""}
       </div>
       <button class="projet-suppr" data-suppr="${p.id}" title="Supprimer le projet" type="button">✕</button>
     </div>`).join("");
+  // un projet travaille en arrière-plan : l'accueil suit sa progression en direct
+  clearTimeout(chargerProjets.minuteur);
+  if (liste.some((p) => p.progression)) {
+    chargerProjets.minuteur = setTimeout(() => { if (!$("#accueil").hidden) chargerProjets(); }, 2000);
+  }
 }
 
 $("#liste-projets").addEventListener("click", async (e) => {
@@ -329,16 +336,18 @@ function afficherTraitement() {
   $("#traitement").hidden = !montrer;
   $("#vide").hidden = montrer || P.clips.length > 0;
   if (!montrer) return;
-  const pct = job ? job.pct : 0;
+  const pct = job ? (job.etape_pct ?? job.pct) : 0;   // pendant un téléchargement : sa propre progression
   $("#traitement-etape").textContent = enCours ? (job?.etape || "Démarrage…") : (P.etat === "erreur" ? "Le traitement a échoué" : "Traitement interrompu");
   $("#traitement-barre").style.width = `${pct}%`;
   $("#traitement-pct").textContent = `${pct} %`;
   $("#traitement-msg").textContent = job?.message || "";
   const etape = pct < 66 ? 1 : pct < 100 ? 2 : 3;
-  $("#traitement-etapes li[data-e=\"1\"]").textContent = P.lien && pct < 15 ? "Téléchargement de la vidéo" : "Transcription de la vidéo";
+  const telechargement = job?.etape_pct !== undefined && job?.etape_pct !== null;
+  $("#traitement-etapes li[data-e=\"1\"]").textContent = telechargement ? "Téléchargement de la vidéo" : "Transcription de la vidéo";
   $$("#traitement-etapes li").forEach((li) => {
     const n = +li.dataset.e;
-    li.className = n < etape ? "faite" : n === etape && enCours ? "encours" : "";
+    const e = telechargement ? 1 : etape;
+    li.className = n < e ? "faite" : n === e && enCours ? "encours" : "";
   });
   const err = $("#traitement-erreur");
   err.hidden = !P.erreur || enCours; err.textContent = P.erreur || "";

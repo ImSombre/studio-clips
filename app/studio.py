@@ -46,7 +46,7 @@ import telechargement  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.0"
+VERSION = "3.1"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -303,6 +303,7 @@ def job_analyse(pid):
 
                 def suivi(fraction, detail):
                     job["pct"] = int(fraction * 14)
+                    job["etape_pct"] = int(fraction * 100)   # la barre montre LE téléchargement, de 0 à 100 %
                     job["message"] = detail
                 try:
                     chemin, titre, duree = telechargement.telecharger(
@@ -310,6 +311,7 @@ def job_analyse(pid):
                         ffmpeg=os.path.join(APP, "bin") if os.path.isdir(os.path.join(APP, "bin")) else None)
                 except telechargement.Annule:
                     raise Arret() from None
+                job.pop("etape_pct", None)
                 with verrou:
                     p["source"], p["nom"] = chemin, titre[:120]
                     p["duree"] = get_video_duration(chemin) or duree
@@ -535,7 +537,10 @@ def liste_projets():
             continue
         if p["etat"] == "traitement" and not occupe(pid, "analyse"):
             p["etat"] = "interrompu"
-        res.append({"id": pid, "nom": p["nom"], "cree": p["cree"], "etat": p["etat"],
+        en_cours = next((j for j in taches(pid) if j["type"] == "analyse" and j["etat"] == "en_cours"), None)
+        progression = ({"etape": en_cours["etape"], "pct": en_cours.get("etape_pct", en_cours["pct"]),
+                        "message": en_cours.get("message", "")} if en_cours else None)
+        res.append({"id": pid, "nom": p["nom"], "cree": p["cree"], "etat": p["etat"], "progression": progression,
                     "clips": len(p["clips"]), "exportes": sum(1 for c in p["clips"] if c.get("exporte")),
                     "premier": p["clips"][0]["id"] if p["clips"] else None})
     res.sort(key=lambda x: x["cree"], reverse=True)
@@ -937,6 +942,15 @@ def installer_maj():
     subprocess.Popen([exe, os.path.join(APP, "lanceur.py"), "--apres-fermeture", str(os.getpid())],
                      cwd=APP, creationflags=lanceur.DETACHE, close_fds=True)
     threading.Timer(1.0, lambda: os._exit(0)).start()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/quitter")
+def quitter():
+    """Demandé par le lanceur quand une mise à jour attend : on s'arrête, sauf si un travail est en cours."""
+    if occupe():
+        return jsonify({"erreur": "travail en cours"}), 409
+    threading.Timer(0.5, lambda: os._exit(0)).start()
     return jsonify({"ok": True})
 
 

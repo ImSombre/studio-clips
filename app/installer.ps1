@@ -109,6 +109,12 @@ if (-not (Test-Path -LiteralPath $ollama)) {
     $cmd = Get-Command ollama -ErrorAction SilentlyContinue
     if ($cmd) { $ollama = $cmd.Source } else { Stop-Erreur "Ollama ne s'est pas installe." }
 }
+# L'application Ollama ouvre une fenêtre « Create an account » et se relance à chaque démarrage :
+# on n'a besoin que de son moteur, invisible. On ferme l'appli et on retire son démarrage automatique.
+Get-Process -Name 'ollama app' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$demarrageOllama = Join-Path ([Environment]::GetFolderPath('Startup')) 'Ollama.lnk'
+if (Test-Path -LiteralPath $demarrageOllama) { [IO.File]::Delete($demarrageOllama) }
+Start-Sleep -Seconds 2
 function Ollama-Repond { try { Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 3 | Out-Null; $true } catch { $false } }
 if (-not (Ollama-Repond)) {
     Start-Process -FilePath $ollama -ArgumentList 'serve' -WindowStyle Hidden
