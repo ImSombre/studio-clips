@@ -985,15 +985,17 @@ function remplirReglages(c) {
   $("#r-maj").setAttribute("aria-pressed", String(!!s.majuscules));
   $("#r-maj").textContent = s.majuscules ? "AA" : "Aa";
   const cad = c.cadrage;
-  $$("#r-cadrage button").forEach((b) => b.classList.toggle("choisi", b.dataset.v === cad.mode));
   const auto = cad.auto !== false;
+  // en cadrage intelligent, aucun des deux modes n'est « choisi » : c'est l'appli qui décide plan par plan
+  $$("#r-cadrage button").forEach((b) => b.classList.toggle("choisi", !auto && b.dataset.v === cad.mode));
   $("#r-auto").setAttribute("aria-pressed", String(auto));
   $("#aide-auto").textContent = auto
-    ? "Suit le visage et montre les infos affichées (article, capture…) ; écran partagé quand il y a les deux. Choix ci-dessous = quand il n'y a ni l'un ni l'autre."
-    : "Cadrage fixe sur tout le clip.";
+    ? "Suit le visage et montre les infos affichées (article, capture…) ; écran partagé quand il y a les deux. "
+      + "Pour garder le même cadrage tout le clip, choisis-en un ci-dessous."
+    : "Cadrage fixe sur tout le clip. Reclique sur ✨ Cadrage intelligent pour que l'appli recadre toute seule.";
   ecran.classList.toggle("remplir", cad.mode === "remplir");
   video.style.objectPosition = `${50 + cad.decalage}% 50%`;
-  $("#ligne-decalage").hidden = cad.mode !== "remplir";
+  $("#ligne-decalage").hidden = auto || cad.mode !== "remplir";
   if (actif !== $("#r-decalage")) $("#r-decalage").value = cad.decalage;
   $("#v-decalage").textContent = cad.decalage > 0 ? `+${cad.decalage}` : cad.decalage;
   const mt = montageDe(c);
@@ -1069,11 +1071,14 @@ function changerStyle(partiel) {
 }
 function changerCadrage(partiel) {
   const c = clip(); if (!c) return;
+  // un mode (plein écran / vidéo entière + flou) ou un recentrage choisi à la main = cadrage FIXE :
+  // sinon le cadrage intelligent l'ignorerait dès qu'il y a un visage à l'écran
+  if (!("auto" in partiel)) partiel = { ...partiel, auto: false };
   Object.assign(c.cadrage, partiel);
-  if (c.cadrage.auto === false || "auto" in partiel) c.cadrages = [];   // l'ancien plan ne vaut plus : le serveur renvoie le nouveau
+  c.cadrages = [];   // l'ancien plan ne vaut plus : le serveur renvoie le nouveau
   remplirReglages(c);
   dernierDessin = "";
-  planifierPatch({ cadrage: { auto: c.cadrage.auto !== false, ...partiel } });
+  planifierPatch({ cadrage: partiel });
 }
 $("#r-auto").addEventListener("click", () => changerCadrage({ auto: clip()?.cadrage.auto === false }));
 
