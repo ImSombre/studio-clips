@@ -28,7 +28,7 @@ APP = os.path.dirname(os.path.abspath(__file__))
 DEPOT = "ImSombre/studio-clips"   # remplacé à la publication
 URL_VERSION = os.environ.get("STUDIO_MAJ_URL") or f"https://github.com/{DEPOT}/releases/latest/download/version.json"
 GARDES = {".venv", "bin", "projets", ".fenetre", "studio.log", "studio.log.ancien", "lanceur.log", ".studio-port",
-          ".sauvegarde-maj", "__pycache__", ".installe"}
+          ".sauvegarde-maj", "__pycache__", ".installe", ".ytdlp-maj"}
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DETACHE = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 

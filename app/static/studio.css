@@ -499,4 +499,20 @@ input[type=range] { flex: 1; accent-color: var(--rec); height: 20px; }
 .hors-ligne-carte { max-width: 460px; background: var(--panneau); border: 1px solid var(--trait-fort); border-radius: 22px; padding: 28px; }
 .hors-ligne-carte h2 { font: 800 26px/1.15 var(--affiche); margin: 12px 0 10px; }
 .hors-ligne-carte p { color: var(--doux); margin: 0; }
-button:disabled { cursor: not-allowed; }
+button:disabled { cursor: not-allowed; }.ou { display: flex; align-items: center; gap: 12px; margin: 12px 0; color: var(--tres-doux); font: 600 11px var(--mono); letter-spacing: .2em; text-transform: uppercase; }
+.ou::before, .ou::after { content: ""; flex: 1; height: 1px; background: var(--trait); }
+.zone-lien {
+  display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 12px; background: var(--nuit);
+  border: 1.5px dashed var(--trait-fort); border-radius: var(--rayon); transition: border-color .2s;
+}
+.zone-lien:focus-within { border-color: var(--trait-fort); border-style: solid; }
+.zone-lien.choisie { border-color: var(--rec); border-style: solid; }
+.zone-lien.invalide { border-color: #ffb86b; }
+.zone-icone.petit { width: 36px; height: 36px; border-radius: 10px; }
+.zone-lien input { flex: 1; min-width: 0; background: none; border: 0; outline: none; padding: 8px 0; font-size: 14px; }
+.zone-lien input::placeholder { color: var(--tres-doux); }
+.plage { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; font-size: 13px; color: var(--doux); }
+.plage em { font-style: normal; color: var(--tres-doux); }
+.plage label { display: flex; align-items: center; gap: 6px; }
+.plage input { width: 84px; background: var(--nuit); border: 1px solid var(--trait); border-radius: 8px; padding: 6px 8px; outline: none; font: 13px var(--mono); }
+.plage input:focus { border-color: var(--rec); }

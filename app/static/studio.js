@@ -135,6 +135,7 @@ $("#btn-choisir").addEventListener("click", async () => {
     const { chemin } = await api("/api/choisir", { body: {} });
     if (chemin) {
       cheminChoisi = chemin;
+      $("#lien").value = ""; $("#plage").hidden = true; $(".zone-lien").classList.remove("choisie", "invalide");
       $("#nom-video").textContent = chemin.split(/[\\/]/).pop();
       $("#chemin-video").textContent = chemin;
       b.classList.add("choisie");
@@ -145,8 +146,26 @@ $("#btn-choisir").addEventListener("click", async () => {
     }
   } catch (err) { toast(err.message); $("#nom-video").textContent = "Choisir une vidéo"; }
   b.disabled = false;
-  $("#btn-lancer").disabled = !cheminChoisi;
+  majBoutonLancer();
 });
+
+/* Lien d'une vidéo en ligne (YouTube, Twitch, TikTok…) : alternative au fichier */
+const lienValide = (t) => /^https?:\/\/\S+\.\S+/.test((t || "").trim());
+function majBoutonLancer() {
+  const lien = $("#lien").value.trim();
+  $("#plage").hidden = !lienValide(lien);
+  $("#btn-lancer").disabled = !(cheminChoisi || lienValide(lien));
+  $(".zone-lien").classList.toggle("choisie", lienValide(lien));
+  $(".zone-lien").classList.toggle("invalide", !!lien && !lienValide(lien));
+}
+$("#lien").addEventListener("input", () => {
+  if ($("#lien").value.trim() && cheminChoisi) {   // on colle un lien : il remplace le fichier choisi
+    cheminChoisi = ""; $("#nom-video").textContent = "Choisir une vidéo";
+    $("#chemin-video").textContent = "MP4, MOV, MKV, AVI…"; $("#btn-choisir").classList.remove("choisie");
+  }
+  majBoutonLancer();
+});
+$("#lien").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("#btn-lancer").disabled) $("#btn-lancer").click(); });
 
 $("#puces-accueil").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
@@ -156,11 +175,16 @@ $("#puces-accueil").addEventListener("click", (e) => {
 });
 
 $("#btn-lancer").addEventListener("click", async () => {
-  if (!cheminChoisi) return;
+  const lien = $("#lien").value.trim();
+  if (!cheminChoisi && !lienValide(lien)) return;
   $("#btn-lancer").disabled = true;
   try {
-    const { id } = await api("/api/projets", { body: { chemin: cheminChoisi, consigne: $("#consigne").value } });
+    const corps = lienValide(lien) && !cheminChoisi
+      ? { lien, debut: $("#lien-de").value, fin: $("#lien-a").value, consigne: $("#consigne").value }
+      : { chemin: cheminChoisi, consigne: $("#consigne").value };
+    const { id } = await api("/api/projets", { body: corps });
     cheminChoisi = ""; $("#consigne").value = "";
+    $("#lien").value = ""; $("#lien-de").value = ""; $("#lien-a").value = ""; majBoutonLancer();
     $("#nom-video").textContent = "Choisir une vidéo"; $("#chemin-video").textContent = "MP4, MOV, MKV, AVI…";
     $("#btn-choisir").classList.remove("choisie");
     ouvrirProjet(id);
@@ -216,7 +240,9 @@ function fusionner(e) {
   const ancien = clip();
   const anciensIds = P.clips.map((c) => c.id).join();
   const garde = glisse || deplace || patchEnVol || Object.keys(patchEnAttente).length ? ancien : null;
-  Object.assign(P, { etat: e.etat, erreur: e.erreur, duree: e.duree ?? P.duree, jobs: e.jobs, source_existe: e.source_existe });
+  Object.assign(P, { etat: e.etat, erreur: e.erreur, duree: e.duree ?? P.duree, jobs: e.jobs, source_existe: e.source_existe,
+                     nom: e.nom ?? P.nom, lien: e.lien ?? P.lien });
+  $("#titre-projet").textContent = P.nom;   // un projet créé depuis un lien prend le vrai titre une fois téléchargé
   P.clips = e.clips.map((c) => (garde && c.id === garde.id ? garde : c));
   const dernier = (l) => (l?.length ? `${l.length}|${l[l.length - 1].t}` : "");
   const chatChange = dernier(P.chat) !== dernier(e.chat);
@@ -309,6 +335,7 @@ function afficherTraitement() {
   $("#traitement-pct").textContent = `${pct} %`;
   $("#traitement-msg").textContent = job?.message || "";
   const etape = pct < 66 ? 1 : pct < 100 ? 2 : 3;
+  $("#traitement-etapes li[data-e=\"1\"]").textContent = P.lien && pct < 15 ? "Téléchargement de la vidéo" : "Transcription de la vidéo";
   $$("#traitement-etapes li").forEach((li) => {
     const n = +li.dataset.e;
     li.className = n < etape ? "faite" : n === etape && enCours ? "encours" : "";

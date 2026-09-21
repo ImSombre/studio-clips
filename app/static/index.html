@@ -30,6 +30,20 @@
         </span>
       </button>
 
+      <div class="ou"><span>ou</span></div>
+      <div class="zone-lien">
+        <span class="zone-icone petit" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1.5 1.5M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1.5-1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        <input id="lien" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+               placeholder="Colle un lien : YouTube, rediffusion Twitch, TikTok, Kick…" aria-label="Lien de la vidéo">
+      </div>
+      <div id="plage" class="plage" hidden>
+        <span>Seulement une partie <em>(facultatif, conseillé pour une longue rediff)</em> :</span>
+        <label>de <input id="lien-de" placeholder="1:20:00" aria-label="Début"></label>
+        <label>à <input id="lien-a" placeholder="2:05:00" aria-label="Fin"></label>
+      </div>
+
       <label class="etiquette" for="consigne">Ce que tu veux <span>(facultatif)</span></label>
       <textarea id="consigne" rows="2" placeholder="Ex : les moments drôles, clips de 1 min à 1 min 05, évite l'intro…"></textarea>
       <div class="puces" id="puces-accueil">

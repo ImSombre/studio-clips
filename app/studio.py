@@ -42,10 +42,11 @@ import assistant  # noqa: E402
 import lanceur  # noqa: E402
 import modele_ia  # noqa: E402
 import montage  # noqa: E402
+import telechargement  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, codec_video as montage_codec  # noqa: E402
 
-VERSION = "2.9"
+VERSION = "3.0"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -166,7 +167,9 @@ def vue_projet(p, avec_segments=True):
     v["clips"] = [vue_clip(c, p) for c in p["clips"]]
     v["chat"] = p.get("chat", [])[-200:]
     v["jobs"] = taches(p["id"])
-    v["source_existe"] = os.path.exists(p["source"])
+    # projet créé depuis un lien : tant que la vidéo n'est pas téléchargée, rien n'est « introuvable »
+    v["source_existe"] = bool(p["source"]) and os.path.exists(p["source"]) or (bool(p.get("lien")) and not p["source"])
+    v["lien"] = p.get("lien")
     if avec_segments:
         v["segments"] = p.get("segments", [])
     return v
@@ -292,6 +295,25 @@ def job_analyse(pid):
         p["etat"], p["erreur"] = "traitement", None
         sauver(p)
         try:
+            base_transcription = 8
+            if p.get("lien") and not (p["source"] and os.path.exists(p["source"])):
+                # Projet créé depuis un lien : on télécharge d'abord la vidéo.
+                base_transcription = 15
+                job["etape"] = "Téléchargement de la vidéo"
+
+                def suivi(fraction, detail):
+                    job["pct"] = int(fraction * 14)
+                    job["message"] = detail
+                try:
+                    chemin, titre, duree = telechargement.telecharger(
+                        p["lien"], suivi, lambda: job.get("annule"), p.get("debut_lien"), p.get("fin_lien"),
+                        ffmpeg=os.path.join(APP, "bin") if os.path.isdir(os.path.join(APP, "bin")) else None)
+                except telechargement.Annule:
+                    raise Arret() from None
+                with verrou:
+                    p["source"], p["nom"] = chemin, titre[:120]
+                    p["duree"] = get_video_duration(chemin) or duree
+                    sauver(p)
             if not os.path.exists(p["source"]):
                 raise RuntimeError("La vidéo d'origine est introuvable (déplacée, renommée ou clé USB débranchée). "
                                    "Clique sur « Retrouver la vidéo ».")
@@ -317,8 +339,8 @@ def job_analyse(pid):
                         job["message"] = msg.strip()
                         m = re.search(r"(\d+) % transcrit", msg)
                         if m:
-                            job["pct"] = 8 + int(int(m.group(1)) * 0.57)
-                    job["pct"] = 8
+                            job["pct"] = base_transcription + int(int(m.group(1)) * (66 - base_transcription) / 100)
+                    job["pct"] = base_transcription
                     # Modèle de transcription selon la puissance du PC (base = ~3x plus rapide que small)
                     taille_whisper = "small" if modele_ia.ram_go() >= 15 else "base"
                     segments, _, langue = transcribe_video(p["source"], model_size=taille_whisper, log=log_transcription)
@@ -544,14 +566,31 @@ def choisir_video():
 @app.post("/api/projets")
 def creer_projet():
     d = request.get_json(force=True)
-    source = d.get("chemin", "")
-    if not os.path.isfile(source):
+    source = (d.get("chemin") or "").strip()
+    consigne = (d.get("consigne") or "").strip()
+    lien = (d.get("lien") or "").strip() or (None if source else telechargement.trouver_lien(consigne))
+    if lien:
+        if not telechargement.est_un_lien(lien):
+            return jsonify({"erreur": "Ce lien n'est pas valide : il doit commencer par https://"}), 400
+        try:
+            debut, fin = telechargement.lire_heure(d.get("debut")), telechargement.lire_heure(d.get("fin"))
+        except ValueError as e:
+            return jsonify({"erreur": str(e)}), 400
+        if debut is not None and fin is not None and fin <= debut:
+            return jsonify({"erreur": "L'heure de fin doit être après l'heure de début."}), 400
+        consigne = consigne.replace(lien, "").strip(" ,;")
+        from urllib.parse import urlparse
+        site = urlparse(lien).netloc.lower().removeprefix("www.").removeprefix("m.") or "internet"
+        nom, duree = f"Vidéo en ligne ({site})", None
+    elif os.path.isfile(source):
+        debut = fin = None
+        nom, duree = os.path.splitext(os.path.basename(source))[0], get_video_duration(source)
+    else:
         return jsonify({"erreur": "Vidéo introuvable."}), 400
     pid = uuid.uuid4().hex[:12]
-    p = {"id": pid, "nom": os.path.splitext(os.path.basename(source))[0], "source": source,
-         "consigne": (d.get("consigne") or "").strip(), "cree": datetime.now().isoformat(timespec="seconds"),
-         "etat": "traitement", "erreur": None, "duree": get_video_duration(source), "segments": [],
-         "clips": [], "chat": []}
+    p = {"id": pid, "nom": nom, "source": "" if lien else source, "lien": lien, "debut_lien": debut,
+         "fin_lien": fin, "consigne": consigne, "cree": datetime.now().isoformat(timespec="seconds"),
+         "etat": "traitement", "erreur": None, "duree": duree, "segments": [], "clips": [], "chat": []}
     sauver(p, creer=True)
     job_analyse(pid)
     return jsonify({"id": pid})
@@ -985,6 +1024,25 @@ def reparer_raccourci():
         traceback.print_exc()
 
 
+def mettre_a_jour_ytdlp():
+    """YouTube, Twitch & co changent souvent : un yt-dlp de plus d'un jour peut ne plus marcher.
+    On le remet à jour en arrière-plan, au plus une fois par jour."""
+    repere = os.path.join(APP, ".ytdlp-maj")
+    try:
+        if time.time() - os.path.getmtime(repere) < 86400:
+            return
+    except OSError:
+        pass
+    if not os.path.isdir(os.path.join(APP, ".venv")):
+        return
+    exe = sys.executable.replace("pythonw.exe", "python.exe")
+    r = subprocess.run([exe, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-U", "yt-dlp[default]"],
+                       capture_output=True, creationflags=NO_WIN, timeout=600)
+    if r.returncode == 0:
+        with open(repere, "w") as f:
+            f.write(datetime.now().isoformat(timespec="seconds"))
+
+
 def remettre_en_ordre():
     """Au démarrage : les analyses coupées par une fermeture brutale passent en « interrompu »."""
     for pid in os.listdir(PROJETS):
@@ -1019,6 +1077,7 @@ def main():
     threading.Thread(target=surveiller_fermeture, daemon=True).start()
     threading.Thread(target=modele_ia.preparer, daemon=True).start()
     threading.Thread(target=reparer_raccourci, daemon=True).start()
+    threading.Thread(target=mettre_a_jour_ytdlp, daemon=True).start()
     if "--sans-fenetre" not in sys.argv:
         threading.Timer(1.0, ouvrir_fenetre, args=(f"http://127.0.0.1:{port}/",)).start()
     print(f"Studio Clips v{VERSION} sur http://127.0.0.1:{port}/", flush=True)
