@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.4"
+VERSION = "3.5"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -750,7 +750,11 @@ def creer_projet():
 
 @app.get("/api/projets/<pid>")
 def lire_projet(pid):
-    return jsonify(vue_projet(charger(pid)))
+    p = charger(pid)
+    vue = vue_projet(p)
+    if p.get("clips") and p.get("etat") != "traitement":
+        job_vision(pid)   # projet d'avant la mise à jour : on regarde l'image en fond, sans rien demander
+    return jsonify(vue)
 
 
 @app.delete("/api/projets/<pid>")
@@ -773,6 +777,12 @@ def relancer(pid):
     with verrou:
         if "consigne" in d:
             p["consigne"] = d["consigne"]
+        if d.get("refaire"):
+            # bouton « Refaire les clips » : on rechoisit les passages avec la version actuelle
+            # (la transcription et l'analyse d'image déjà faites sont gardées : c'est rapide)
+            p["clips"] = []
+            dire(p, "Je refais le choix des passages avec la nouvelle version "
+                    "(clips d'au moins 1 minute, cadrage intelligent). La transcription est gardée, c'est rapide.")
         sauver(p)
     job_analyse(pid)
     return jsonify({"ok": True})

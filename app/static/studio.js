@@ -338,6 +338,8 @@ function afficherTraitement() {
   const montrer = enCours || (!P.clips.length && P.etat !== "pret");
   $("#traitement").hidden = !montrer;
   $("#vide").hidden = montrer || P.clips.length > 0;
+  // bouton du bandeau : il reste visible quand le projet est prêt (donc AVANT le retour ci-dessous)
+  $("#btn-refaire").hidden = enCours || !P.clips.length || P.source_existe === false;
   if (!montrer) return;
   const pct = job ? (job.etape_pct ?? job.pct) : 0;   // pendant un téléchargement : sa propre progression
   $("#traitement-etape").textContent = enCours ? (job?.etape || "Démarrage…") : (P.etat === "erreur" ? "Le traitement a échoué" : "Traitement interrompu");
@@ -363,6 +365,21 @@ $("#btn-relancer").addEventListener("click", () => uneFois("relancer", async () 
   await api(`/api/projets/${pid}/relancer`, { body: {} });
   if (P?.id !== pid) return;
   P.etat = "traitement"; P.erreur = null; afficherTraitement(); planifierPoll(300);
+}));
+/* « Refaire les clips » : rechoisit les passages avec la version actuelle de l'appli */
+$("#btn-refaire").addEventListener("click", () => uneFois("refaire", async () => {
+  if (!P) return;
+  const n = P.clips?.length || 0;
+  if (n && !confirm(`Refaire les ${n} clip(s) avec la nouvelle version ?\n\n`
+      + "• les passages sont rechoisis (au moins 1 minute chacun)\n"
+      + "• le cadrage intelligent est appliqué\n"
+      + "• tes réglages actuels (titres, sous-titres, morceaux) seront perdus\n\n"
+      + "La vidéo n'est pas re-transcrite : c'est rapide.")) return;
+  const pid = P.id;
+  await api(`/api/projets/${pid}/relancer`, { body: { refaire: true } });
+  if (P?.id !== pid) return;
+  P.etat = "traitement"; P.erreur = null; P.clips = []; cur = null;
+  afficherClips(true); afficherTraitement(); planifierPoll(300);
 }));
 $("#btn-arreter").addEventListener("click", () => uneFois("arreter", async () => {
   if (!confirm("Arrêter le traitement en cours ? Tu pourras le relancer plus tard.")) return;
