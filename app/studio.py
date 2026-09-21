@@ -45,7 +45,7 @@ import montage  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, codec_video as montage_codec  # noqa: E402
 
-VERSION = "2.8"
+VERSION = "2.9"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -962,6 +962,29 @@ def premiere_instance():
         return True
 
 
+def reparer_raccourci():
+    """À chaque démarrage : si le raccourci du Bureau a disparu (ou n'a jamais été créé), on le recrée."""
+    if not os.path.isdir(os.path.join(APP, ".venv")):
+        return   # lancé hors installation (développement)
+    marqueur = os.path.join(APP, ".installe")
+    if not os.path.exists(marqueur):
+        with open(marqueur, "w") as f:
+            f.write(datetime.now().isoformat(timespec="seconds"))
+    ps = lambda chemin: chemin.replace("'", "''")   # chaîne PowerShell entre apostrophes
+    script = (
+        "$b=[Environment]::GetFolderPath('Desktop'); $l=Join-Path $b 'Studio Clips.lnk'; "
+        "if(-not (Test-Path -LiteralPath $l)){ $w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut($l); "
+        "$s.TargetPath=Join-Path $env:WINDIR 'System32\\wscript.exe'; "
+        f"$s.Arguments='\"{ps(os.path.join(APP, 'demarrer.vbs'))}\"'; $s.WorkingDirectory='{ps(APP)}'; "
+        f"$s.IconLocation='{ps(os.path.join(APP, 'icone.ico'))},0'; $s.Description='Studio Clips'; $s.Save() }}"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       creationflags=NO_WIN, timeout=30, capture_output=True)
+    except Exception:  # noqa: BLE001 — jamais bloquant
+        traceback.print_exc()
+
+
 def remettre_en_ordre():
     """Au démarrage : les analyses coupées par une fermeture brutale passent en « interrompu »."""
     for pid in os.listdir(PROJETS):
@@ -995,6 +1018,7 @@ def main():
         f.write(str(port))
     threading.Thread(target=surveiller_fermeture, daemon=True).start()
     threading.Thread(target=modele_ia.preparer, daemon=True).start()
+    threading.Thread(target=reparer_raccourci, daemon=True).start()
     if "--sans-fenetre" not in sys.argv:
         threading.Timer(1.0, ouvrir_fenetre, args=(f"http://127.0.0.1:{port}/",)).start()
     print(f"Studio Clips v{VERSION} sur http://127.0.0.1:{port}/", flush=True)

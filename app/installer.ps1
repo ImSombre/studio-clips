@@ -7,6 +7,21 @@ $ProgressPreference = 'SilentlyContinue'
 $App = $PSScriptRoot
 Set-Location -LiteralPath $App
 
+function Creer-Raccourcis($App) {
+    # Bureau + menu Démarrer. Le raccourci passe par demarrer.vbs : pas de fenêtre noire, et un
+    # message clair si on clique avant la fin de l'installation.
+    $ws = New-Object -ComObject WScript.Shell
+    foreach ($dossier in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+        if (-not $dossier -or -not (Test-Path -LiteralPath $dossier)) { continue }
+        $lnk = $ws.CreateShortcut((Join-Path $dossier 'Studio Clips.lnk'))
+        $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+        $lnk.Arguments = "`"$(Join-Path $App 'demarrer.vbs')`""
+        $lnk.WorkingDirectory = $App
+        $lnk.IconLocation = "$(Join-Path $App 'icone.ico'),0"
+        $lnk.Description = 'Studio Clips (se met a jour tout seul)'
+        $lnk.Save()
+    }
+}
 function Etape($t) { Write-Host ""; Write-Host "==> $t" -ForegroundColor Cyan }
 function Ok($t)    { Write-Host "    OK : $t" -ForegroundColor Green }
 function Stop-Erreur($t) {
@@ -123,20 +138,11 @@ Write-Host "    Telechargement du modele de transcription '$whisper'..."
 if ($LASTEXITCODE -ne 0) { Stop-Erreur "Le telechargement du modele de transcription a echoue." }
 Ok "modeles prets"
 
-# --- 5. Raccourci sur le Bureau --------------------------------------------
-Etape "5/5 Raccourci sur le Bureau"
-$bureau = [Environment]::GetFolderPath('Desktop')
-$ws = New-Object -ComObject WScript.Shell
-$lnk = $ws.CreateShortcut((Join-Path $bureau 'Studio Clips.lnk'))
-$lnk.TargetPath = Join-Path $App '.venv\Scripts\pythonw.exe'
-$lnk.Arguments = "`"$(Join-Path $App 'lanceur.py')`""
-$lnk.WorkingDirectory = $App
-$lnk.Description = "Studio Clips (se met a jour tout seul)"
-$lnk.WindowStyle = 1
-$edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
-if (Test-Path -LiteralPath $edge) { $lnk.IconLocation = "$edge,0" }
-$lnk.Save()
-Ok "raccourci 'Studio Clips' cree"
+# --- 5. Raccourcis (Bureau + menu Démarrer) --------------------------------
+Etape "5/5 Raccourcis"
+Creer-Raccourcis $App
+Set-Content -LiteralPath (Join-Path $App '.installe') -Value (Get-Date -Format s)
+Ok "raccourci 'Studio Clips' sur le Bureau et dans le menu Demarrer"
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor Green

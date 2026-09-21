@@ -11,6 +11,21 @@ trap {
     Read-Host "Appuie sur Entree pour fermer"; exit 1
 }
 $dest = Join-Path $env:LOCALAPPDATA 'StudioClips'
+function Creer-Raccourcis($App) {
+    # Bureau + menu Démarrer. Le raccourci passe par demarrer.vbs : pas de fenêtre noire, et un
+    # message clair si on clique avant la fin de l'installation.
+    $ws = New-Object -ComObject WScript.Shell
+    foreach ($dossier in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+        if (-not $dossier -or -not (Test-Path -LiteralPath $dossier)) { continue }
+        $lnk = $ws.CreateShortcut((Join-Path $dossier 'Studio Clips.lnk'))
+        $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+        $lnk.Arguments = "`"$(Join-Path $App 'demarrer.vbs')`""
+        $lnk.WorkingDirectory = $App
+        $lnk.IconLocation = "$(Join-Path $App 'icone.ico'),0"
+        $lnk.Description = 'Studio Clips (se met a jour tout seul)'
+        $lnk.Save()
+    }
+}
 
 Write-Host "=============================================" -ForegroundColor Magenta
 Write-Host "        Installation de Studio Clips" -ForegroundColor Magenta
@@ -40,6 +55,9 @@ $racine = (Get-ChildItem -LiteralPath $tmp -Recurse -Filter 'studio.py' | Select
 Copy-Item -Path (Join-Path $racine '*') -Destination $dest -Recurse -Force
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "    OK : $dest" -ForegroundColor Green
+# Le raccourci arrive TOUT DE SUITE (l'installation complète peut prendre 30 min)
+Creer-Raccourcis $dest
+Write-Host "    OK : raccourci 'Studio Clips' sur le Bureau" -ForegroundColor Green
 
 if ($ancien -and (Test-Path -LiteralPath (Join-Path $ancien 'projets'))) {
     Write-Host "    Recuperation de tes projets de l'ancienne version..."
