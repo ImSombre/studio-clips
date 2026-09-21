@@ -315,7 +315,7 @@ function afficherClips(reconstruire) {
 
 /* Tout changement de clip passe par ici : modifs envoyées au BON clip, état remis à zéro. */
 function apresChangementDeClip() {
-  libre = false; glisse = null;
+  libre = false; glisse = null; iPassage = 0;
   if (typeof deplace !== "undefined") deplace = null;
   $("#idees").hidden = true;
   const c = clip();
@@ -371,7 +371,7 @@ $("#btn-arreter").addEventListener("click", () => uneFois("arreter", async () =>
 }));
 
 function afficherJobs() {
-  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres", vision: "Image" };
+  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres", vision: "Image", assembler: "Assemblage" };
   const actifs = P.jobs.filter((j) => j.etat === "en_cours" && j.type !== "analyse");
   // regroupés par type : 30 exports = une seule pastille « Export 3/30 »
   const parType = {};
@@ -484,7 +484,21 @@ const MOTS_VIDES = new Set(("alors aussi avait avant avec cette comme comment da
   "tout toute toutes tous très trop vais votre vous about after again because before being could their there these thing think " +
   "those would really right").split(" "));
 const normMot = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}_]/gu, "");
-const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, ...(c?.montage || {}) });
+const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, transitions: true, ...(c?.montage || {}) });
+const FONDU = 0.25;   // fondu entre deux morceaux assemblés (même valeur que montage.py)
+/* Un clip peut assembler PLUSIEURS morceaux de la vidéo. Un seul, par défaut. */
+const passagesDe = (c) => (c?.passages?.length ? c.passages : [[c.debut, c.fin]]).map(([a, b]) => [+a, +b]);
+let iPassage = 0, jonctions = [];
+function passageCourant(c) { const ps = passagesDe(c); return ps[Math.min(iPassage, ps.length - 1)]; }
+function ecrirePassage(c, i, a, b) {
+  const ps = passagesDe(c);
+  ps[i] = [+(+a).toFixed(2), +(+b).toFixed(2)];
+  c.passages = ps; c.debut = ps[0][0]; c.fin = ps[ps.length - 1][1];
+}
+function envoyerPassages(c, delai = 400) {
+  // toujours la liste complète : envoyer « début/fin » sur un clip à plusieurs morceaux serait ambigu
+  planifierPatch({ passages: passagesDe(c) }, delai);
+}
 let blocs = [], plans = [];
 
 function motsDuPassage(debut, fin) {
@@ -497,11 +511,25 @@ function motsDuPassage(debut, fin) {
   return mots;
 }
 
-/* Passages gardés [[a, b]] en temps de la vidéo source (les blancs et les « euh » sautent). */
+/* Blocs gardés de tout le clip (tous ses morceaux) ; `jonctions` = là où deux morceaux se rejoignent. */
 function calculerBlocs(c) {
-  if (!montageDe(c).coupes || !P.segments) return [[c.debut, c.fin]];
-  const mots = motsDuPassage(c.debut, c.fin).filter((w) => !HESITATIONS.has(normMot(w.text)));
-  if (!mots.length) return [[c.debut, c.fin]];
+  const res = []; const j = [];
+  for (const [a, b] of passagesDe(c)) {
+    const part = blocsDunPassage(c, a, b);
+    if (res.length && part.length) j.push([res[res.length - 1][1], part[0][0]]);
+    res.push(...part);
+  }
+  jonctions = j;
+  return res;
+}
+function blocsDunPassage(c, debut, fin) {
+  if (!montageDe(c).coupes || !P.segments) return [[debut, fin]];
+  const c2 = { debut, fin };
+  const mots = motsDuPassage(debut, fin).filter((w) => !HESITATIONS.has(normMot(w.text)));
+  if (!mots.length) return [[debut, fin]];
+  return blocsDesMots(mots, c2);
+}
+function blocsDesMots(mots, c) {
   const bl = []; let finMot = null;
   for (const w of mots) {
     if (bl.length && w.start - finMot <= TROU_MIN) bl[bl.length - 1][1] = Math.min(c.fin, w.end + MARGE);
@@ -686,6 +714,21 @@ function rendreCadrage(c, t) {
   }
   return plan;
 }
+/* Fondu au noir juste avant / juste après une jonction entre deux morceaux (comme à l'export) */
+function rendreFondu(c, t) {
+  if (!montageDe(c).transitions || !jonctions.length) return;
+  let noir = 0;
+  for (const [finA, debutB] of jonctions) {
+    if (t <= finA && finA - t < FONDU) noir = Math.max(noir, 1 - (finA - t) / FONDU);
+    if (t >= debutB && t - debutB < FONDU) noir = Math.max(noir, 1 - (t - debutB) / FONDU);
+  }
+  if (noir <= 0.01) return;
+  const cv = $("#rendu"), ctx = cv.getContext("2d");
+  ctx.fillStyle = `rgba(0,0,0,${Math.min(1, noir).toFixed(3)})`;
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  dernierDessin = "";   // l'image suivante doit être redessinée
+}
+
 /* Le texte s'écarte de l'info montrée (si la personne n'a pas placé le texte elle-même) */
 function placerTextesSelonPlan(c, plan) {
   const st = plan?.st != null && c.style.position === ST_DEFAUT ? plan.st : c.style.position;
@@ -707,7 +750,7 @@ function boucle(now) {
   if (!video.paused && !libre && !glisse && t >= finReelle - 0.02) {
     if ($("#boucle").checked) { video.currentTime = premier; t = premier; }
     else { video.pause(); video.currentTime = premier; t = premier; }
-  } else if (!video.paused && !libre && !glisse && montageDe(c).coupes) {
+  } else if (!video.paused && !libre && !glisse && (montageDe(c).coupes || blocs.length > 1)) {
     // l'aperçu saute les blancs, comme le fera l'export
     const suivant = blocs.find(([a, b]) => t < b);
     if (suivant && t < suivant[0] - 0.04) { video.currentTime = suivant[0]; t = suivant[0]; }
@@ -717,6 +760,7 @@ function boucle(now) {
   const tSortie = versSortie(t, blocs);
   rendreHabillage(c, tSortie);
   const plan = rendreCadrage(c, t);
+  if (plan) rendreFondu(c, t);
   if (!deplace) placerTextesSelonPlan(c, plan);
   $("#t-actuel").textContent = fmt(libre ? t - c.debut : tSortie);
   $("#tl-tete").style.left = `${pos(t)}%`;
@@ -733,8 +777,9 @@ requestAnimationFrame(boucle);
 /* =================== timeline =================== */
 function calculerFenetre() {
   const c = clip(); if (!c) return;
-  const marge = Math.max(8, (c.fin - c.debut) * 0.35);
-  fenetre = [Math.max(0, c.debut - marge), Math.min(P.duree || c.fin + marge, c.fin + marge)];
+  const ps = passagesDe(c), a0 = ps[0][0], b0 = ps[ps.length - 1][1];
+  const marge = Math.max(8, (b0 - a0) * 0.35);
+  fenetre = [Math.max(0, a0 - marge), Math.min(P.duree || b0 + marge, b0 + marge)];
 }
 const pos = (t) => ((t - fenetre[0]) / (fenetre[1] - fenetre[0])) * 100;
 const tempsA = (clientX) => {
@@ -764,40 +809,103 @@ function dessinerTimeline() {
 
 function majZone() {
   const c = clip(); if (!c) return;
+  const ps = passagesDe(c);
+  if (iPassage >= ps.length) iPassage = ps.length - 1;
+  const [da, fa] = ps[iPassage];
   const z = $("#tl-zone");
-  z.style.left = `${pos(c.debut)}%`;
-  z.style.width = `${pos(c.fin) - pos(c.debut)}%`;
-  $$("#tl-mots i").forEach((i) => i.classList.toggle("dedans", +i.dataset.t >= c.debut && +i.dataset.t < c.fin));
-  $("#t-debut").textContent = fmt(c.debut);
-  $("#t-fin").textContent = fmt(c.fin);
-  // durée du clip MONTÉ (blancs retirés) et passages coupés hachurés sur la timeline
+  z.style.left = `${pos(da)}%`;
+  z.style.width = `${pos(fa) - pos(da)}%`;
+  // les autres morceaux du clip, en clair : un clic dessus les sélectionne
+  $("#tl-autres").innerHTML = ps.map(([a, b], i) => i === iPassage ? ""
+    : `<i data-i="${i}" style="left:${pos(a)}%;width:${Math.max(0.5, pos(b) - pos(a))}%"></i>`).join("");
+  $$("#tl-mots i").forEach((i) => i.classList.toggle("dedans", ps.some(([a, b]) => +i.dataset.t >= a && +i.dataset.t < b)));
+  $("#t-debut").textContent = fmt(da);
+  $("#t-fin").textContent = fmt(fa);
+  // durée du clip MONTÉ (blancs retirés) et blancs coupés hachurés sur la timeline
   const bl = calculerBlocs(c);
   $("#t-duree").textContent = fmt(dureeMontee(bl));
+  const saut = (a, b) => jonctions.some(([x, y]) => Math.abs(x - a) < 0.05 && Math.abs(y - b) < 0.05);
   let coupes = "";
-  for (let k = 0; k + 1 < bl.length; k++) coupes += `<i style="left:${pos(bl[k][1])}%;width:${pos(bl[k + 1][0]) - pos(bl[k][1])}%"></i>`;
+  for (let k = 0; k + 1 < bl.length; k++) {
+    if (saut(bl[k][1], bl[k + 1][0])) continue;   // saut entre deux morceaux : pas une coupe de blanc
+    coupes += `<i style="left:${pos(bl[k][1])}%;width:${pos(bl[k + 1][0]) - pos(bl[k][1])}%"></i>`;
+  }
   $("#tl-coupes").innerHTML = coupes;
+  majMorceaux(c, ps);
 }
+
+/* Bande « Morceaux » : un bouton par morceau assemblé, + pour en ajouter un */
+function majMorceaux(c, ps) {
+  const box = $("#morceaux");
+  box.hidden = false;
+  box.innerHTML = ps.map(([a, b], i) =>
+    `<button type="button" class="morceau${i === iPassage ? " choisi" : ""}" data-i="${i}">` +
+    `<b>${i + 1}</b> ${fmtCourt(a)} → ${fmtCourt(b)}` +
+    (ps.length > 1 ? `<span class="x" data-sup="${i}" title="Enlever ce morceau">✕</span>` : "") +
+    `</button>`).join("") +
+    `<button type="button" class="morceau ajout" data-ajout="1" title="Ajouter un morceau de la vidéo à ce clip">＋ Ajouter un morceau</button>` +
+    (ps.length > 1 ? `<span class="morceaux-aide">fondu entre chaque morceau</span>` : "");
+}
+
+$("#morceaux").addEventListener("click", (e) => {
+  const c = clip(); if (!c) return;
+  const sup = e.target.closest("[data-sup]");
+  if (sup) {
+    const ps = passagesDe(c);
+    if (ps.length < 2) return;
+    ps.splice(+sup.dataset.sup, 1);
+    c.passages = ps; c.debut = ps[0][0]; c.fin = ps[ps.length - 1][1];
+    iPassage = Math.min(iPassage, ps.length - 1);
+    calculerSousTitres(); calculerFenetre(); dessinerTimeline(); afficherClips(false);
+    envoyerPassages(c, 0);
+    return;
+  }
+  if (e.target.closest("[data-ajout]")) {
+    const ps = passagesDe(c);
+    const t = video.currentTime, max = P.duree || t + 20;
+    let a = Math.max(0, Math.min(t, max - DUREE_MIN));
+    for (const [x, y] of ps) if (a >= x - 0.01 && a < y) a = y + 0.05;   // déjà dans un morceau : on démarre après
+    let b = Math.min(max, a + 15);
+    for (const [x] of ps) if (x > a) { b = Math.min(b, x - 0.5); break; }   // et on s'arrête avant le suivant
+    if (b - a < DUREE_MIN) { toast("Pas la place d'ajouter un morceau ici"); return; }
+    ps.push([+a.toFixed(2), +b.toFixed(2)]);
+    ps.sort((u, v) => u[0] - v[0]);
+    c.passages = ps; c.debut = ps[0][0]; c.fin = ps[ps.length - 1][1];
+    iPassage = ps.findIndex(([x]) => Math.abs(x - a) < 0.001);
+    calculerSousTitres(); calculerFenetre(); dessinerTimeline(); afficherClips(false);
+    envoyerPassages(c, 0);
+    video.currentTime = a;
+    return;
+  }
+  const b = e.target.closest("[data-i]");
+  if (b) { iPassage = +b.dataset.i; majZone(); video.currentTime = passageCourant(c)[0]; }
+});
+$("#tl-autres").addEventListener("pointerdown", (e) => {
+  const b = e.target.closest("[data-i]"); const c = clip();
+  if (b && c) { iPassage = +b.dataset.i; majZone(); video.currentTime = passageCourant(c)[0]; }
+});
 
 $("#tl-piste").addEventListener("pointerdown", (e) => {
   const c = clip(); if (!c) return;
   const p = e.target.closest(".poignee");
   if (p) {
     glisse = p.dataset.p;
-    glisse_depart = { debut: c.debut, fin: c.fin, clip: c.id };
+    glisse_depart = { passages: JSON.stringify(passagesDe(c)), clip: c.id };
     e.target.setPointerCapture(e.pointerId);
     video.pause();
     return;
   }
   const t = tempsA(e.clientX);
-  libre = t < c.debut || t > c.fin;
+  libre = !passagesDe(c).some(([a, b]) => t >= a && t <= b);
   video.currentTime = t;
 });
 $("#tl-piste").addEventListener("pointermove", (e) => {
   if (!glisse) return;
   const c = clip(); const t = tempsA(e.clientX);
-  if (glisse === "debut") c.debut = +Math.min(t, c.fin - DUREE_MIN).toFixed(2);
-  else c.fin = +Math.max(t, c.debut + DUREE_MIN).toFixed(2);
-  video.currentTime = glisse === "debut" ? c.debut : c.fin;
+  const [a, b] = passageCourant(c);
+  if (glisse === "debut") ecrirePassage(c, iPassage, Math.min(t, b - DUREE_MIN), b);
+  else ecrirePassage(c, iPassage, a, Math.max(t, a + DUREE_MIN));
+  video.currentTime = glisse === "debut" ? passageCourant(c)[0] : passageCourant(c)[1];
   calculerSousTitres(); majZone();
 });
 let glisse_depart = null;
@@ -806,12 +914,12 @@ function finGlisse() {
   const c = clip(); glisse = null;
   if (!c) return;
   // un simple clic sans déplacement ne doit rien envoyer (ni effacer « exporté », ni remplir l'historique)
-  if (glisse_depart && glisse_depart.clip === c.id && (glisse_depart.debut !== c.debut || glisse_depart.fin !== c.fin)) {
-    planifierPatch({ debut: c.debut, fin: c.fin }, 0);
+  if (glisse_depart && glisse_depart.clip === c.id && glisse_depart.passages !== JSON.stringify(passagesDe(c))) {
+    envoyerPassages(c, 0);
   }
   glisse_depart = null;
   calculerFenetre(); dessinerTimeline();
-  video.currentTime = c.debut;
+  video.currentTime = passageCourant(c)[0];
 }
 $("#tl-piste").addEventListener("pointerup", finGlisse);
 $("#tl-piste").addEventListener("pointercancel", finGlisse);
@@ -819,18 +927,20 @@ $("#tl-piste").addEventListener("lostpointercapture", finGlisse);
 
 $(".bornes").addEventListener("click", (e) => {
   const b = e.target.closest("button"); const c = clip(); if (!b || !c) return;
+  const [a, b0] = passageCourant(c);
   if (b.dataset.ici) {
     const t = video.currentTime;
-    if (b.dataset.ici === "debut") c.debut = +Math.min(t, c.fin - DUREE_MIN).toFixed(2);
-    else c.fin = +Math.max(t, c.debut + DUREE_MIN).toFixed(2);
+    if (b.dataset.ici === "debut") ecrirePassage(c, iPassage, Math.min(t, b0 - DUREE_MIN), b0);
+    else ecrirePassage(c, iPassage, a, Math.max(t, a + DUREE_MIN));
   } else {
     const d = +b.dataset.d;
-    if (b.dataset.borne === "debut") c.debut = +Math.max(0, Math.min(c.debut + d, c.fin - DUREE_MIN)).toFixed(2);
-    else c.fin = +Math.min(P.duree || 1e9, Math.max(c.fin + d, c.debut + DUREE_MIN)).toFixed(2);
-    video.currentTime = b.dataset.borne === "debut" ? c.debut : Math.max(c.debut, c.fin - 2);
+    if (b.dataset.borne === "debut") ecrirePassage(c, iPassage, Math.max(0, Math.min(a + d, b0 - DUREE_MIN)), b0);
+    else ecrirePassage(c, iPassage, a, Math.min(P.duree || 1e9, Math.max(b0 + d, a + DUREE_MIN)));
+    const [na, nb] = passageCourant(c);
+    video.currentTime = b.dataset.borne === "debut" ? na : Math.max(na, nb - 2);
   }
   calculerSousTitres(); majZone();
-  planifierPatch({ debut: c.debut, fin: c.fin });
+  envoyerPassages(c);
 });
 
 /* =================== réglages =================== */
@@ -965,7 +1075,8 @@ $("#titre-clip").addEventListener("keydown", (e) => { if (e.key === "Enter") e.t
 /* Envoi groupé des modifs (évite une requête à chaque cran de curseur) */
 function planifierPatch(partiel, delai = 400) {
   for (const [k, v] of Object.entries(partiel)) {
-    patchEnAttente[k] = typeof v === "object" && v ? { ...(patchEnAttente[k] || {}), ...v } : v;
+    // une liste (les morceaux du clip) remplace l'ancienne ; un objet (style, cadrage…) se complète
+    patchEnAttente[k] = typeof v === "object" && v && !Array.isArray(v) ? { ...(patchEnAttente[k] || {}), ...v } : v;
   }
   patchEnAttente.__clip = cur;
   clearTimeout(minuteurPatch);

@@ -29,6 +29,8 @@ CE_QUE_JE_SAIS_FAIRE = (
     "• cadrage : « plein écran », « fond flou », « cadre plus à gauche »\n"
     "• montage : « enlève les zooms », « garde les blancs », « sans barre », « sans accroche », « sous-titres sans animation »\n"
     "• titres : « trouve-moi un titre », « donne un titre à tous les clips », « renomme le clip en … »\n"
+    "• plusieurs morceaux dans un clip : « assemble les meilleurs moments », « ajoute le passage de 3:10 à 3:40 », "
+    "« enlève le 2e passage », « sans fondus »\n"
     "• « trouve-moi un passage drôle », « exporte », « annule »\n"
     "Ajoute « sur tous les clips » pour appliquer partout."
 )
@@ -41,6 +43,19 @@ COULEURS = {
 }
 HISTORIQUE_MAX = 40
 DUREE_MIN_CLIP = 3.0
+
+
+def _mmss(t):
+    return f"{int(t) // 60}:{int(t) % 60:02d}"
+
+
+def _instant(texte):
+    """« 3:10 », « 3 min 10 », « 190 s » -> secondes, ou None."""
+    m = re.match(r"\s*(\d{1,3})\s*[:hm]\s*(\d{1,2})", texte)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    m = re.match(r"\s*(\d+(?:[.,]\d+)?)\s*(s|sec\w*)?", texte)
+    return float(m.group(1).replace(",", ".")) if m else None
 
 
 def sans_accents(t):
@@ -99,6 +114,26 @@ def annuler(clip):
     return True
 
 
+def poser_passages(clip, liste, duree_video=None):
+    """Range les morceaux assemblés du clip (tri, fusion de ceux qui se touchent) et recale debut/fin."""
+    propre = []
+    for x in sorted((float(a), float(b)) for a, b in liste):
+        a, b = x
+        if duree_video:
+            a, b = max(0.0, min(a, duree_video)), min(b, duree_video)
+        if b - a < DUREE_MIN_CLIP:
+            continue
+        if propre and a <= propre[-1][1] + 0.05:
+            propre[-1][1] = max(propre[-1][1], round(b, 2))
+        else:
+            propre.append([round(a, 2), round(b, 2)])
+    if not propre:
+        return False
+    clip["passages"] = propre
+    clip["debut"], clip["fin"] = propre[0][0], propre[-1][1]
+    return True
+
+
 def appliquer(projet, clip, actions):
     """Applique des actions sur le clip. Retourne (descriptions, speciales)."""
     duree_video = projet.get("duree") or 10 ** 9
@@ -117,7 +152,15 @@ def appliquer(projet, clip, actions):
         fin = max(debut + DUREE_MIN_CLIP, min(float(fin), duree_video))
         if recaler:
             fin = max(debut + DUREE_MIN_CLIP, _fin_sur_un_mot(segments, debut, fin))
+        ps = _montage.passages_du_clip(clip)
+        if len(ps) > 1:
+            ps[0] = (min(debut, ps[0][1] - DUREE_MIN_CLIP), ps[0][1])
+            ps[-1] = (ps[-1][0], max(fin, ps[-1][0] + DUREE_MIN_CLIP))
+            poser_passages(clip, ps, duree_video)
+            return
         clip["debut"], clip["fin"] = round(debut, 2), round(fin, 2)
+        if clip.get("passages"):
+            clip["passages"] = [[clip["debut"], clip["fin"]]]
 
     for a in actions:
         if not isinstance(a, dict):
@@ -145,6 +188,27 @@ def appliquer(projet, clip, actions):
                 fin_visee = _montage.fin_pour_duree(segments, clip["debut"], s, clip.get("montage"), duree_video)
                 bornes(clip["debut"], fin_visee, recaler=True)
                 fait.append(f"durée réglée sur {s:g} s")
+            elif typ == "passages":
+                avant_modif()
+                if poser_passages(clip, a.get("liste") or [], duree_video):
+                    fait.append(f"{len(clip['passages'])} morceau(x) assemblé(s)")
+            elif typ == "ajouter_passage":
+                avant_modif()
+                d, f = float(a.get("debut", 0)), float(a.get("fin", 0))
+                if f - d >= DUREE_MIN_CLIP and poser_passages(clip, _montage.passages_du_clip(clip) + [(d, f)], duree_video):
+                    fait.append(f"passage {_mmss(d)} → {_mmss(f)} ajouté")
+            elif typ == "retirer_passage":
+                avant_modif()
+                ps = _montage.passages_du_clip(clip)
+                i = a.get("index")
+                if i is None and a.get("instant") is not None:   # « enlève le passage de 2:30 »
+                    t_ = float(a["instant"])
+                    i = min(range(len(ps)), key=lambda k: abs((ps[k][0] + ps[k][1]) / 2 - t_)) if ps else None
+                i = len(ps) - 1 if i in (None, -1) else int(i)
+                if len(ps) > 1 and 0 <= i < len(ps):
+                    retire = ps.pop(i)
+                    poser_passages(clip, ps, duree_video)
+                    fait.append(f"passage {_mmss(retire[0])} → {_mmss(retire[1])} retiré")
             elif typ == "sous_titres":
                 avant_modif()
                 st = {**STYLE_DEFAUT, **clip.get("style", {})}
@@ -191,7 +255,7 @@ def appliquer(projet, clip, actions):
                 avant_modif()
                 mt = {**MONTAGE_DEFAUT, **clip.get("montage", {})}
                 noms = {"coupes": "blancs coupés", "zooms": "zooms", "anim": "sous-titres animés",
-                        "accroche": "accroche", "barre": "barre de progression"}
+                        "accroche": "accroche", "barre": "barre de progression", "transitions": "fondus"}
                 for cle, nom in noms.items():
                     if cle in a:
                         mt[cle] = bool(a[cle])
@@ -237,7 +301,7 @@ def appliquer(projet, clip, actions):
                 avant_modif()
                 clip["titre"] = str(a["texte"]).strip()[:80]
                 fait.append(f"renommé « {clip['titre']} »")
-            elif typ in ("tous", "aide", "proposer_titres", "titrer_tous"):
+            elif typ in ("tous", "aide", "proposer_titres", "titrer_tous", "assembler"):
                 speciales.append(typ)
             elif typ == "annuler":
                 speciales.append("annuler")
@@ -278,6 +342,22 @@ def lecture_rapide(message, historique=None):
         return [{"type": "exporter"}]
     if re.search(r"\b(un autre|nouveau|nouvel|trouve[- ]moi|cherche[- ]moi|cherche)\s+(\w+\s+){0,3}?(clip|passage|extrait|moment)", t):
         return [{"type": "nouveau_clip", "consigne": message}]
+
+    # « ajoute le passage de 3:10 à 3:40 », « assemble les meilleurs moments », « enlève le 2e passage »
+    m = re.search(r"(ajoute|rajoute|colle|met[s]?)\w*\b[^0-9]{0,30}(\d{1,3}\s*[:hm]\s*\d{1,2}|\d+(?:[.,]\d+)?\s*s?)"
+                  r"\s*(?:a|à|jusqu.?a|->|-)\s*(\d{1,3}\s*[:hm]\s*\d{1,2}|\d+(?:[.,]\d+)?\s*s?)", t)
+    if m and re.search(r"passage|morceau|bout|extrait|moment", t):
+        d, f = _instant(m.group(2)), _instant(m.group(3))
+        if d is not None and f is not None and f > d:
+            actions.append({"type": "ajouter_passage", "debut": d, "fin": f})
+    if re.search(r"assemble|best.?of|meilleurs? (moments|passages)|plusieurs (passages|morceaux|extraits)|"
+                 r"resume(r|z)? la video|compile", t):
+        actions.append({"type": "assembler"})
+    m = re.search(r"(enleve|retire|supprime|vire)\w*\D{0,12}(\d{1,2})?\w*\s*(passage|morceau)", t)
+    if m:
+        actions.append({"type": "retirer_passage", "index": int(m.group(2)) - 1 if m.group(2) else None})
+    elif re.search(r"(enleve|retire|supprime|vire)\w* (le |les )?(dernier|derniers?) (passage|morceau)", t):
+        actions.append({"type": "retirer_passage", "index": None})
 
     nombre = r"(\d+(?:[.,]\d+)?)"
     m = re.search(rf"(coupe|enleve|retire|supprime|vire|raccourci\w*)\D*?{nombre}\s*(s|sec\w*)?\b.*?(premi|debut|avant)", t)
@@ -404,6 +484,8 @@ def lecture_rapide(message, historique=None):
         mt["accroche"] = not re.search(non + r".{0,12}accroche", t)
     if re.search(r"\bbarre\b", t):
         mt["barre"] = not re.search(non + r".{0,12}barre", t)
+    if re.search(r"transition|fondus?\b", t):
+        mt["transitions"] = not re.search(non + r".{0,14}(transition|fondus?)", t)
     if mt:
         actions = [x for x in actions if not (x["type"] == "cadrage" and "zoom" in t and "auto" not in x)]
         actions.append({"type": "montage", **mt})
@@ -488,6 +570,9 @@ Actions possibles (mets une liste vide s'il n'y a rien à modifier) :
    (titre/partie false = enlève ; "contenu" vide = le titre du clip ; "numero" vide = le rang du clip)
    "position" (sous-titres comme titre) = hauteur en % depuis le haut de l'écran : 0 = tout en haut, 100 = tout en bas.
    Pour « espacer » le titre et les sous-titres : baisse la position du titre ET augmente celle des sous-titres.
+{"type":"ajouter_passage","debut":190,"fin":220}  AJOUTE un 2e morceau de la video AU MEME clip (temps en secondes)
+{"type":"retirer_passage","index":1}      enleve le 2e morceau assemble (index 0 = le premier)
+{"type":"assembler"}                      fabrique un clip qui assemble les MEILLEURS moments de toute la video
 {"type":"nouveau_clip","consigne":"un passage drôle"}  cherche un NOUVEAU clip dans la vidéo
 {"type":"exporter"}                       fabrique le fichier MP4
 {"type":"tous"}                           à AJOUTER si la demande vaut pour tous les clips
@@ -642,7 +727,10 @@ def traiter_message(projet, clip, message, historique):
         return debut + CE_QUE_JE_SAIS_FAIRE, speciales, rapide, []
     if reponse is None or (fait and not reponse.strip()):
         if fait:
-            reponse = "C'est fait : " + ", ".join(fait) + f". Le clip dure {clip['fin'] - clip['debut']:.0f} s."
+            blocs, _j = _montage.blocs_du_clip(projet.get("segments", []), clip, clip.get("montage"))
+            duree = _montage.duree_montee(blocs)   # durée du clip MONTÉ (morceaux assemblés, blancs retirés)
+            reponse = ("C'est fait : " + ", ".join(fait) + f". Le clip dure {duree:.0f} s"
+                       + (" (moins d'1 min : TikTok ne le rémunérera pas)." if duree < 60 else "."))
         elif "annuler" in speciales:
             reponse = ""
         elif "exporter" in speciales:

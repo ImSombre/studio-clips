@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.3"
+VERSION = "3.4"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -162,11 +162,12 @@ def vue_clip(c, p=None):
     v["style"] = {**montage.STYLE_DEFAUT, **c.get("style", {})}
     v["cadrage"] = {**montage.CADRAGE_DEFAUT, **c.get("cadrage", {})}
     v["montage"] = {**montage.MONTAGE_DEFAUT, **c.get("montage", {})}
+    v["passages"] = [list(x) for x in montage.passages_du_clip(c)]
     v["cadrages"], v["taille_source"] = [], None
     if p is not None:
         try:
             segs = p.get("segments", [])
-            blocs = montage.blocs_gardes(segs, c["debut"], c["fin"], v["montage"])
+            blocs, _jonctions = montage.blocs_du_clip(segs, c, v["montage"])
             v["cadrages"] = vision.plan_cadrage(blocs, segs, p.get("vision"), v["cadrage"], v["montage"])
             v["taille_source"] = (p.get("vision") or {}).get("taille")
         except Exception:  # noqa: BLE001 — sans plan, l'aperçu garde le cadrage simple
@@ -311,7 +312,8 @@ def _assurer_vision(pid, job=None, pct=(0, 100)):
     Jamais bloquant : si ça rate, le clip garde simplement le cadrage par défaut."""
     p = charger(pid)
     with verrou:
-        zones = vision.zones_manquantes(p.get("vision"), [(c["debut"], c["fin"]) for c in p["clips"]])
+        zones = vision.zones_manquantes(
+            p.get("vision"), [z for c in p["clips"] for z in montage.passages_du_clip(c)])
     if not zones or not p.get("source") or not os.path.exists(p["source"]):
         return
 
@@ -338,7 +340,7 @@ def _assurer_vision(pid, job=None, pct=(0, 100)):
 def job_vision(pid):
     """Analyse d'image en fond pour les clips nouveaux ou rallongés (l'aperçu se met à jour tout seul)."""
     p = charger(pid)
-    if not vision.zones_manquantes(p.get("vision"), [(c["debut"], c["fin"]) for c in p["clips"]]):
+    if not vision.zones_manquantes(p.get("vision"), [z for c in p["clips"] for z in montage.passages_du_clip(c)]):
         return None
     if any(j["type"] == "vision" and j["etat"] == "en_cours" for j in taches(pid)):
         return None
@@ -516,6 +518,63 @@ def job_nouveau_clip(pid, consigne):
     return lancer_job(pid, "nouveau_clip", travail, etape="Recherche")
 
 
+def job_assembler(pid, consigne=""):
+    """Fabrique UN clip qui assemble plusieurs moments forts de la vidéo, avec des fondus entre eux."""
+    def travail(job):
+        p = charger(pid)
+        if not p.get("segments"):
+            with verrou:
+                dire(p, "Il n'y a rien de parlé dans cette vidéo : je ne peux pas assembler de moments.")
+                sauver(p)
+            return
+        job["etape"] = "L'IA cherche les meilleurs moments"
+
+        def log(msg):
+            _surveiller(job)
+            job["message"] = msg.strip()
+            m = re.search(r"partie (\d+)/(\d+)", msg)
+            if m:
+                job["pct"] = int(80 * (int(m.group(1)) - 1) / int(m.group(2)))
+
+        modele_ia.attendre_pret()
+        with verrou_lourd:
+            trouves = find_best_clips(_texte_horodate(p["segments"]), model=modele_ia.actif(), log=log,
+                                      custom_instructions=(consigne + " Choisis des moments COURTS et forts.").strip(),
+                                      video_duration=p.get("duree"), max_clips=8, clip_min=12, clip_max=28)
+        if not trouves:
+            trouves = _decoupage_de_secours(p, (12, 28))
+        # les meilleurs d'abord, puis remis dans l'ordre de la vidéo jusqu'à dépasser la minute
+        choisis, total = [], 0.0
+        for c in sorted(trouves, key=lambda x: -x.get("score", 5)):
+            if total >= 75:
+                break
+            a, b = float(c["start"]), float(c["end"])
+            if any(min(b, y) - max(a, x) > 0 for x, y in choisis):
+                continue   # se chevauche avec un morceau déjà pris
+            choisis.append((a, b))
+            total += b - a
+        choisis.sort()
+        with verrou:
+            if len(choisis) < 2:
+                dire(p, "Je n'ai pas trouvé assez de moments forts pour en assembler plusieurs.")
+                sauver(p)
+                return
+            c = nouveau_clip({"start": choisis[0][0], "end": choisis[0][1], "title": "Les meilleurs moments",
+                              "reason": "Plusieurs passages assemblés avec des fondus.", "score": 9}, p["segments"])
+            assistant.poser_passages(c, choisis, p.get("duree"))
+            c["historique"] = []
+            p["clips"] = sorted(p["clips"] + [c], key=lambda x: x["debut"])
+            job["resultat"] = c["id"]
+            dire(p, f"J'ai assemblé {len(choisis)} moments en un clip de {total:.0f} s, avec un fondu entre chacun. "
+                    "Tu peux enlever un morceau (« enlève le 2e passage ») ou en ajouter un "
+                    "(« ajoute le passage de 3:10 à 3:40 »).", c["id"])
+            sauver(p)
+        job["etape"] = "L'IA regarde l'image"
+        with verrou_lourd:
+            _assurer_vision(pid, job, (85, 99))
+    return lancer_job(pid, "assembler", travail, etape="Assemblage")
+
+
 def job_titrer_tous(pid):
     """Un titre accrocheur pour chaque clip, tiré de ce qui y est dit."""
     def travail(job):
@@ -545,7 +604,8 @@ NOMS_RESERVES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(
 
 
 def _empreinte(c):
-    return json.dumps([c.get(k) for k in ("debut", "fin", "style", "cadrage", "texte", "titre", "montage")], sort_keys=True)
+    return json.dumps([c.get(k) for k in ("debut", "fin", "passages", "style", "cadrage", "texte", "titre", "montage")],
+                      sort_keys=True)
 
 
 def job_export(pid, cid):
@@ -574,7 +634,7 @@ def job_export(pid, cid):
                 nom += " clip"
             sortie = montage.chemin_unique(os.path.join(sortie_dir, f"{nom}.mp4"))
 
-            if vision.zones_manquantes(p.get("vision"), [(a_exporter["debut"], a_exporter["fin"])]):
+            if vision.zones_manquantes(p.get("vision"), montage.passages_du_clip(a_exporter)):
                 job["etape"] = "L'IA regarde l'image"
                 _assurer_vision(pid, job, (0, 10))
                 job["etape"] = f"Export de « {a_exporter['titre']} »"
@@ -802,6 +862,8 @@ def modifier_clip(pid, cid):
         actions = []
         if "debut" in d or "fin" in d:
             actions.append({"type": "bornes", "debut": d.get("debut", c["debut"]), "fin": d.get("fin", c["fin"])})
+        if isinstance(d.get("passages"), list):
+            actions.append({"type": "passages", "liste": d["passages"]})
         if isinstance(d.get("style"), dict):
             actions.append({"type": "sous_titres", **d["style"]})
         if isinstance(d.get("cadrage"), dict):
@@ -820,7 +882,7 @@ def modifier_clip(pid, cid):
             c["exporte"] = None
         sauver(p)
         vue = vue_clip(c, p)
-    if "debut" in d or "fin" in d:
+    if "debut" in d or "fin" in d or "passages" in d:
         job_vision(pid)
     return jsonify(vue)
 
@@ -901,7 +963,7 @@ def exporter_tout(pid):
 
 
 TYPES_MONTAGE = ("couper_debut", "couper_fin", "bornes", "duree", "sous_titres", "cadrage", "texte_ecran", "titre",
-                 "montage")
+                 "montage", "passages", "ajouter_passage", "retirer_passage")
 
 
 @app.post("/api/projets/<pid>/chat")
@@ -977,6 +1039,8 @@ def chat(pid):
             propositions = s[1]
         elif isinstance(s, tuple) and s[0] == "nouveau_clip" and not occupe(pid, "nouveau_clip"):
             job_nouveau_clip(pid, s[1] or message)
+        elif s == "assembler" and not occupe(pid, "assembler"):
+            job_assembler(pid, message)
     reponse_json = vue_projet(p, avec_segments=False)
     if propositions:
         reponse_json["propositions"] = propositions

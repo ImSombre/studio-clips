@@ -539,3 +539,24 @@ button:disabled { cursor: not-allowed; }.ou { display: flex; align-items: center
 .aide { margin: 2px 0 8px; font-size: 12px; line-height: 1.4; color: var(--doux); }
 .clip-meta .court { color: var(--rec); font-weight: 600; }
 #r-auto { margin-left: 0; font: 600 13px var(--corps); }
+
+/* Morceaux assemblés dans un même clip */
+.tl-autres { position: absolute; inset: 0; pointer-events: none; }
+.tl-autres i {
+  position: absolute; top: 0; bottom: 0; border-radius: 6px; pointer-events: auto; cursor: pointer;
+  background: rgba(255, 77, 46, .16); border: 1px solid rgba(255, 77, 46, .45);
+}
+.tl-autres i:hover { background: rgba(255, 77, 46, .26); }
+.morceaux { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.morceau {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; cursor: pointer;
+  background: var(--panneau-2); border: 1px solid var(--trait); color: var(--doux);
+  font: 600 12px var(--mono, var(--corps));
+}
+.morceau b { color: var(--texte); font-weight: 800; }
+.morceau:hover { border-color: var(--trait-fort); color: var(--texte); }
+.morceau.choisi { border-color: var(--rec); color: var(--texte); background: var(--rec-voile); }
+.morceau .x { opacity: .55; padding-left: 2px; }
+.morceau .x:hover { opacity: 1; color: var(--rec); }
+.morceau.ajout { color: var(--texte); border-style: dashed; }
+.morceaux-aide { color: var(--tres-doux); font-size: 12px; }

@@ -144,7 +144,9 @@ LANGUES_SANS_ESPACES = ("zh", "ja", "ko", "th", "yue", "lo", "my")
 # (studio.js reproduit EXACTEMENT les mêmes calculs pour l'aperçu)
 # ----------------------------------------------------------------------
 # coupes = retirer les blancs : désactivé par défaut (sur un passage continu, ça hache pour rien)
-MONTAGE_DEFAUT = {"coupes": False, "zooms": True, "anim": True, "accroche": True, "barre": True}
+MONTAGE_DEFAUT = {"coupes": False, "zooms": True, "anim": True, "accroche": True, "barre": True,
+                  "transitions": True}   # fondu entre deux passages assemblés
+FONDU = 0.25             # durée du fondu image (s) ; le son a le sien, plus court
 FPS = 30
 TROU_MIN = 0.45          # silence (s) à partir duquel on coupe
 MARGE = 0.12             # on garde un peu d'air avant/après chaque mot
@@ -186,6 +188,34 @@ def blocs_gardes(segments, debut, fin, montage=None):
         elif b - a >= 0.2:
             res.append([a, b])
     return [tuple(x) for x in res] or [(debut, fin)]
+
+
+def passages_du_clip(clip):
+    """Morceaux de la vidéo assemblés dans ce clip : [(a, b), …]. Un seul par défaut."""
+    bruts = clip.get("passages") or [[clip["debut"], clip["fin"]]]
+    passages = []
+    for p in bruts:
+        try:
+            a, b = float(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b - a > 0.05:
+            passages.append((a, b))
+    return sorted(passages) or [(float(clip["debut"]), float(clip["fin"]))]
+
+
+def blocs_du_clip(segments, clip, montage=None):
+    """Passages gardés de TOUT le clip + les jonctions entre deux morceaux assemblés.
+
+    Retourne (blocs, jonctions) : `jonctions` = index des blocs qui commencent un nouveau
+    morceau (c'est là qu'on met un fondu, pas aux coupes de blancs d'un même passage)."""
+    blocs, jonctions = [], set()
+    for a, b in passages_du_clip(clip):
+        part = blocs_gardes(segments, a, b, montage)
+        if blocs and part:
+            jonctions.add(len(blocs))
+        blocs += part
+    return blocs, jonctions
 
 
 def duree_montee(blocs):
@@ -339,20 +369,34 @@ def _px(r, sw, sh):
     return f"crop={w}:{h}:{x}:{y}"
 
 
-def filtre_plan(plan, sw, sh):
+def _fondus(graphe, duree, entree, sortie):
+    """Ajoute un fondu au noir en début et/ou en fin de plan (la durée du plan ne change pas)."""
+    if not (entree or sortie) or duree <= 0.05:
+        return graphe
+    d = min(FONDU, duree / 2)
+    f = []
+    if entree:
+        f.append(f"fade=t=in:st=0:d={d:.3f}")
+    if sortie:
+        f.append(f"fade=t=out:st={max(0, duree - d):.3f}:d={d:.3f}")
+    return graphe.replace("[v]", "," + ",".join(f) + "[v]").replace(",,", ",")
+
+
+def filtre_plan(plan, sw, sh, duree=0.0, entree=False, sortie=False):
     """Graphe FFmpeg d'un plan (entrée [0:v], sortie [v] en 1080x1920)."""
     debut = f"[0:v]fps={FPS}:start_time=0,"
+    fini = lambda g: _fondus(g, duree, entree, sortie)
     if plan["type"] == "partage":   # l'info en haut, le visage en bas
         moitie = HAUTEUR // 2
-        return (debut + f"split=2[h][b];[h]{_px(plan['r'], sw, sh)},scale={LARGEUR}:{moitie},setsar=1[hh];"
+        return fini(debut + f"split=2[h][b];[h]{_px(plan['r'], sw, sh)},scale={LARGEUR}:{moitie},setsar=1[hh];"
                 f"[b]{_px(plan['r2'], sw, sh)},scale={LARGEUR}:{moitie},setsar=1[bb];"
                 f"[hh][bb]vstack=inputs=2,drawbox=x=0:y={moitie - 3}:w={LARGEUR}:h=6:color=black:t=fill[v]")
     if plan["type"] == "flou":      # le contenu entier, sur un fond flouté
-        return (debut + f"split=2[bg][fg];[bg]scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=increase,"
+        return fini(debut + f"split=2[bg][fg];[bg]scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=increase,"
                 f"crop={LARGEUR}:{HAUTEUR},boxblur=25:5[bgb];[fg]{_px(plan['r'], sw, sh)},"
                 f"scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=decrease[fgs];"
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
-    return debut + f"{_px(plan['r'], sw, sh)},scale={LARGEUR}:{HAUTEUR},setsar=1[v]"
+    return fini(debut + f"{_px(plan['r'], sw, sh)},scale={LARGEUR}:{HAUTEUR},setsar=1[v]")
 
 
 def chemin_unique(chemin):
@@ -392,19 +436,26 @@ def _ffmpeg(cmd, dossier, suivi=None):
 def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, avec_son=True, vision=None):
     """Fabrique le MP4 final en suivant le plan de cadrage (le même que l'aperçu)."""
     import vision as _vision
-    debut, fin = float(clip["debut"]), float(clip["fin"])
     style = {**STYLE_DEFAUT, **(clip.get("style") or {})}
     montage = {**MONTAGE_DEFAUT, **(clip.get("montage") or {})}
     cadrage = {**CADRAGE_DEFAUT, **(clip.get("cadrage") or {})}
-    blocs = blocs_gardes(segments, debut, fin, montage)
+    passages = passages_du_clip(clip)
+    debut = passages[0][0]
+    blocs, jonctions = blocs_du_clip(segments, clip, montage)
     plans = _vision.plan_cadrage(blocs, segments, vision, cadrage, montage)
     for p in plans:   # plans calés sur la grille des images : les sous-titres ne glissent jamais
         p["de"] = debut + round((p["de"] - debut) * FPS) / FPS
         p["a"] = debut + round((p["a"] - debut) * FPS) / FPS
     plans = [p for p in plans if p["a"] - p["de"] >= 1 / FPS]
     sw, sh = (vision or {}).get("taille") or _vision.taille_video(source)
-    groupes = _vers_sortie_groupes(
-        groupes_sous_titres(mots_du_passage(segments, debut, fin), debut, fin, int(style["mots"])), debut, blocs)
+    # un fondu là où deux morceaux différents se rejoignent (jamais au milieu d'un passage)
+    debuts_jonction = {blocs[i][0] for i in jonctions}
+    fins_jonction = {blocs[i - 1][1] for i in jonctions}
+    proche = lambda t, ens: any(abs(t - x) < 1.5 / FPS for x in ens)
+    groupes = []
+    for a, b in passages:   # les sous-titres ne se groupent jamais par-dessus une jonction
+        groupes += _vers_sortie_groupes(
+            groupes_sous_titres(mots_du_passage(segments, a, b), a, b, int(style["mots"])), a, blocs)
 
     dossier_tmp = tempfile.mkdtemp(prefix="studio_export_")
     try:
@@ -419,9 +470,19 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
         duree_sortie, fait, liste = total, 0.0, []
         for i, (plan, n) in enumerate(zip(plans, images)):
             morceau = f"plan_{i:03d}.mkv"
-            graphe = filtre_plan(plan, sw, sh)
+            duree_plan = n / FPS
+            fondu = montage.get("transitions", True) and len(passages) > 1
+            entree = fondu and proche(plan["de"], debuts_jonction)
+            sortie_f = fondu and proche(plan["a"], fins_jonction)
+            graphe = filtre_plan(plan, sw, sh, duree_plan, entree, sortie_f)
             if avec_son:
-                graphe += f";[0:a]atrim=0:{n / FPS:.6f},asetpts=PTS-STARTPTS,aresample=48000[a]"
+                d = min(0.12, duree_plan / 2)
+                sons = [f"[0:a]atrim=0:{duree_plan:.6f}", "asetpts=PTS-STARTPTS", "aresample=48000"]
+                if entree:
+                    sons.append(f"afade=t=in:st=0:d={d:.3f}")
+                if sortie_f:
+                    sons.append(f"afade=t=out:st={max(0, duree_plan - d):.3f}:d={d:.3f}")
+                graphe += ";" + ",".join(sons) + "[a]"
             _ffmpeg(["ffmpeg", "-y", "-ss", f"{plan['de']:.3f}", "-i", os.path.abspath(source),
                      "-filter_complex", graphe, "-map", "[v]", "-frames:v", str(n),
                      *(["-map", "[a]", "-c:a", "pcm_s16le"] if avec_son else []),

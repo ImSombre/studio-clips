@@ -148,6 +148,7 @@
                 <button type="button" class="bascule texte" data-m="zooms" title="Petit zoom à chaque coupe">Zooms</button>
                 <button type="button" class="bascule texte" data-m="anim" title="Rebond + mot important en couleur">Sous-titres animés</button>
                 <button type="button" class="bascule texte" data-m="accroche" title="Gros titre pendant les 2,5 premières secondes">Accroche</button>
+                <button type="button" class="bascule texte" data-m="transitions" title="Fondu entre deux morceaux assemblés">Fondus</button>
                 <button type="button" class="bascule texte" data-m="barre" title="Barre qui avance en bas de la vidéo">Barre</button>
               </div>
             </div>
@@ -249,12 +250,14 @@
           <div class="tl-piste" id="tl-piste">
             <div class="tl-mots" id="tl-mots"></div>
             <div class="tl-coupes" id="tl-coupes"></div>
+            <div class="tl-autres" id="tl-autres"></div>
             <div class="tl-zone" id="tl-zone">
               <span class="poignee" data-p="debut"></span>
               <span class="poignee" data-p="fin"></span>
             </div>
             <div class="tl-tete" id="tl-tete"></div>
           </div>
+          <div class="morceaux" id="morceaux" hidden></div>
         </div>
       </div>
     </section>
@@ -264,6 +267,7 @@
       <div class="col-entete"><h3>Assistant</h3><span class="doux petit-texte" id="chat-contexte"></span></div>
       <div id="fil" class="fil"></div>
       <div class="puces puces-chat" id="puces-chat">
+        <button type="button">Assemble les meilleurs moments de la vidéo</button>
         <button type="button">Mets tous les clips en plein écran</button>
         <button type="button">Mets le titre et le numéro de partie sur tous les clips</button>
         <button type="button">Qu'est-ce que tu sais faire ?</button>
