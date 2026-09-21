@@ -27,7 +27,7 @@ import requests
 
 # Durée visée pour chaque clip, et tolérance acceptée (l'IA locale vise
 # rarement pile) : ici on accepte de 50 à 100 secondes.
-CLIP_MIN = 60
+CLIP_MIN = 61            # plus d'1 minute : condition pour que TikTok rémunère la vidéo
 CLIP_MAX = 90
 TOLERANCE = 10
 
@@ -200,8 +200,8 @@ def _normalize_clip(clip, video_duration, log, clip_min=CLIP_MIN, clip_max=CLIP_
         end = start + (clip_min + clip_max) / 2
     if video_duration:
         end = min(end, video_duration)
-        if end - start < clip_min * 0.5:
-            # passage proposé tout à la fin : on avance son début au lieu de le jeter
+        if end - start < clip_min:
+            # passage proposé tout à la fin : on avance son début au lieu de le raccourcir
             start = max(0.0, end - (clip_min + clip_max) / 2)
             if end - start < min(clip_min * 0.5, 5):
                 log(f"  Extrait ignoré (vidéo trop courte à cet endroit) : {title}")

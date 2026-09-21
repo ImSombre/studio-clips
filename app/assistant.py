@@ -178,8 +178,15 @@ def appliquer(projet, clip, actions):
                     c["mode"] = a["mode"]
                 if "decalage" in a:
                     c["decalage"] = max(-50, min(50, float(a["decalage"])))
+                if "auto" in a:
+                    c["auto"] = bool(a["auto"])
+                elif a.get("mode") in ("flou", "remplir") or "decalage" in a:
+                    c["auto"] = False   # un cadrage demandé explicitement reste fixe
                 clip["cadrage"] = c
-                fait.append("plein écran" if c["mode"] == "remplir" else "fond flouté")
+                if "auto" in a and len(a) <= 2:
+                    fait.append("cadrage intelligent activé" if c["auto"] else "cadrage fixe")
+                else:
+                    fait.append("plein écran" if c["mode"] == "remplir" else "fond flouté")
             elif typ == "montage":
                 avant_modif()
                 mt = {**MONTAGE_DEFAUT, **clip.get("montage", {})}
@@ -328,6 +335,10 @@ def lecture_rapide(message, historique=None):
         actions.append({"type": "cadrage", "mode": "remplir"})
     elif re.search(r"fond flou|avec (le )?flou|remets? (le )?flou|video entiere|bandes", t):
         actions.append({"type": "cadrage", "mode": "flou"})
+    if re.search(r"cadrage fixe|(enleve|desactive|coupe|arrete)\w* (le )?cadrage (auto|intelligent|malin)", t):
+        actions.append({"type": "cadrage", "auto": False})
+    elif re.search(r"cadrage (auto|intelligent|malin)|suis (le|la) (visage|personne|tete)|zoome? sur (les )?(infos?|articles?|ecran)", t):
+        actions.append({"type": "cadrage", "auto": True})
     m = re.search(r"(cadre|decale|recentre)\w*.*?\b(gauche|droite)\b", t)
     if m:
         actions.append({"type": "cadrage", "mode": "remplir", "decalage_rel": -15 if m.group(2) == "gauche" else 15})
@@ -394,7 +405,7 @@ def lecture_rapide(message, historique=None):
     if re.search(r"\bbarre\b", t):
         mt["barre"] = not re.search(non + r".{0,12}barre", t)
     if mt:
-        actions = [x for x in actions if not (x["type"] == "cadrage" and "zoom" in t)]
+        actions = [x for x in actions if not (x["type"] == "cadrage" and "zoom" in t and "auto" not in x)]
         actions.append({"type": "montage", **mt})
 
     # Placement : « espace-les », « rapproche-les », « monte le titre », « descends les sous-titres »
@@ -471,6 +482,7 @@ Actions possibles (mets une liste vide s'il n'y a rien à modifier) :
 {"type":"sous_titres","couleur":"#FFFFFF","surligne":"#FFE14D","taille":76,"position":"haut|milieu|bas","majuscules":true,"mots":3,"police":"Impact"}
    (ne mets que les champs à changer ; "surligne":"aucun" enlève l'effet karaoké)
 {"type":"cadrage","mode":"remplir"}       plein écran (coupe les côtés) ; "flou" = vidéo entière + fond flou
+{"type":"cadrage","auto":true}            cadrage intelligent : suit le visage, montre les infos à l'écran (écran partagé)
 {"type":"titre","texte":"Nouveau titre"}  renomme le clip
 {"type":"texte_ecran","titre":true,"partie":true,"position":11,"contenu":"Mon texte","numero":3}  AFFICHE un texte et « PARTIE N » en haut de la vidéo
    (titre/partie false = enlève ; "contenu" vide = le titre du clip ; "numero" vide = le rang du clip)

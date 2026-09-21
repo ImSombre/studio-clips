@@ -532,3 +532,10 @@ button:disabled { cursor: not-allowed; }.ou { display: flex; align-items: center
 .bascules-montage .bascule { margin: 0; }
 .tl-coupes { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
 .tl-coupes i { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(10, 9, 8, .75) 0 4px, rgba(10, 9, 8, .35) 4px 8px); }
+/* Cadrage intelligent : l'aperçu est dessiné dans un canvas (même plan que l'export) */
+.rendu { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
+.ecran-video.canvas .rendu { display: block; }
+.ecran-video.canvas #calque { opacity: 0; }
+.aide { margin: 2px 0 8px; font-size: 12px; line-height: 1.4; color: var(--doux); }
+.clip-meta .court { color: var(--rec); font-weight: 600; }
+#r-auto { margin-left: 0; font: 600 13px var(--corps); }

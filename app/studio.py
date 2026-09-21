@@ -44,10 +44,11 @@ import lanceur  # noqa: E402
 import modele_ia  # noqa: E402
 import montage  # noqa: E402
 import telechargement  # noqa: E402
+import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.2"
+VERSION = "3.3"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -161,6 +162,15 @@ def vue_clip(c, p=None):
     v["style"] = {**montage.STYLE_DEFAUT, **c.get("style", {})}
     v["cadrage"] = {**montage.CADRAGE_DEFAUT, **c.get("cadrage", {})}
     v["montage"] = {**montage.MONTAGE_DEFAUT, **c.get("montage", {})}
+    v["cadrages"], v["taille_source"] = [], None
+    if p is not None:
+        try:
+            segs = p.get("segments", [])
+            blocs = montage.blocs_gardes(segs, c["debut"], c["fin"], v["montage"])
+            v["cadrages"] = vision.plan_cadrage(blocs, segs, p.get("vision"), v["cadrage"], v["montage"])
+            v["taille_source"] = (p.get("vision") or {}).get("taille")
+        except Exception:  # noqa: BLE001 — sans plan, l'aperçu garde le cadrage simple
+            traceback.print_exc()
     return v
 
 
@@ -182,6 +192,8 @@ def nouveau_clip(c, segments):
     fin_max = segments[-1]["end"] if segments else c["end"]
     fin = montage.fin_pour_duree(segments, c["start"], c["end"] - c["start"], None, fin_max)
     fin = assistant._fin_sur_un_mot(segments, c["start"], fin)
+    if c["end"] - c["start"] >= 60 and fin - c["start"] < 60.5:   # le recalage ne doit pas repasser sous 1 min
+        fin = min(fin_max, max(assistant._fin_sur_un_mot(segments, c["start"], c["start"] + 62.5), c["start"] + 60.5))
     return {
         "id": uuid.uuid4().hex[:8], "titre": c.get("title") or "Extrait", "raison": c.get("reason", ""),
         "note": c.get("score", 5), "debut": round(c["start"], 2), "fin": max(round(c["start"] + 3, 2), fin),
@@ -276,7 +288,7 @@ def _decoupage_de_secours(p, bornes):
     segs = p.get("segments") or []
     if not segs:
         return []
-    cible = (bornes[0] + bornes[1]) / 2 if bornes else 60
+    cible = (bornes[0] + bornes[1]) / 2 if bornes else 75   # > 1 min : monétisable sur TikTok
     debut_parole, fin_parole = segs[0]["start"], segs[-1]["end"]
     cible = min(cible, max(5, fin_parole - debut_parole))
     clips, t = [], debut_parole
@@ -292,6 +304,51 @@ def _decoupage_de_secours(p, bornes):
             break
         t = suivant
     return clips
+
+
+def _assurer_vision(pid, job=None, pct=(0, 100)):
+    """Regarde l'image des clips (visages, infos affichées à l'écran) si ce n'est pas déjà fait.
+    Jamais bloquant : si ça rate, le clip garde simplement le cadrage par défaut."""
+    p = charger(pid)
+    with verrou:
+        zones = vision.zones_manquantes(p.get("vision"), [(c["debut"], c["fin"]) for c in p["clips"]])
+    if not zones or not p.get("source") or not os.path.exists(p["source"]):
+        return
+
+    def suivi(fraction):
+        if job is not None:
+            job["pct"] = int(pct[0] + (pct[1] - pct[0]) * fraction)
+
+    try:
+        res = vision.analyser(p["source"], zones, suivi, lambda: bool(job and job.get("annule")))
+    except InterruptedError:
+        raise Arret() from None
+    except Exception:  # noqa: BLE001 — OpenCV absent, vidéo illisible… : cadrage par défaut
+        traceback.print_exc()
+        return
+    with verrou:
+        ancien = p.get("vision") or {}
+        garde = [e for e in ancien.get("echantillons", [])
+                 if not any(a - 0.01 <= e["t"] <= b + 0.01 for a, b in zones)]
+        p["vision"] = {"taille": res["taille"],
+                       "echantillons": sorted(garde + res["echantillons"], key=lambda e: e["t"])}
+        sauver(p)
+
+
+def job_vision(pid):
+    """Analyse d'image en fond pour les clips nouveaux ou rallongés (l'aperçu se met à jour tout seul)."""
+    p = charger(pid)
+    if not vision.zones_manquantes(p.get("vision"), [(c["debut"], c["fin"]) for c in p["clips"]]):
+        return None
+    if any(j["type"] == "vision" and j["etat"] == "en_cours" for j in taches(pid)):
+        return None
+
+    def travail(job):
+        job["etape"] = "En attente de la tâche en cours"
+        with verrou_lourd:
+            job["etape"] = "L'IA regarde l'image"
+            _assurer_vision(pid, job)
+    return lancer_job(pid, "vision", travail, etape="L'IA regarde l'image")
 
 
 def job_analyse(pid):
@@ -373,7 +430,7 @@ def job_analyse(pid):
                     job["message"] = msg.strip()
                     m = re.search(r"partie (\d+)/(\d+)", msg)
                     if m:
-                        job["pct"] = 66 + int(32 * (int(m.group(1)) - 1) / int(m.group(2)))
+                        job["pct"] = 66 + int(22 * (int(m.group(1)) - 1) / int(m.group(2)))
 
                 bornes = assistant.fourchette_duree(p.get("consigne", ""))
                 options = {"clip_min": bornes[0], "clip_max": bornes[1]} if bornes else {}
@@ -386,6 +443,11 @@ def job_analyse(pid):
                     trouves, secours = _decoupage_de_secours(p, bornes), True
                 with verrou:
                     p["clips"] = [nouveau_clip(c, p["segments"]) for c in trouves]
+                    sauver(p)
+                # Cadrage intelligent : où sont le visage et les infos affichées (article, capture…)
+                job["etape"], job["message"] = "L'IA regarde l'image (visages, infos à l'écran)", ""
+                _assurer_vision(pid, job, (88, 99))
+                with verrou:
                     p["etat"] = "pret"
                     if p["clips"] and secours:
                         dire(p, f"L'IA n'a pas trouvé de passage vraiment marquant, alors j'ai découpé la vidéo en "
@@ -448,6 +510,9 @@ def job_nouveau_clip(pid, consigne):
                 job["resultat"] = c["id"]
                 dire(p, f"Trouvé : « {c['titre']} » (note {c['note']:.0f}/10). {c['raison']}".strip(), c["id"])
             sauver(p)
+        job["etape"] = "L'IA regarde l'image"
+        with verrou_lourd:
+            _assurer_vision(pid, job, (95, 99))
     return lancer_job(pid, "nouveau_clip", travail, etape="Recherche")
 
 
@@ -509,10 +574,16 @@ def job_export(pid, cid):
                 nom += " clip"
             sortie = montage.chemin_unique(os.path.join(sortie_dir, f"{nom}.mp4"))
 
+            if vision.zones_manquantes(p.get("vision"), [(a_exporter["debut"], a_exporter["fin"])]):
+                job["etape"] = "L'IA regarde l'image"
+                _assurer_vision(pid, job, (0, 10))
+                job["etape"] = f"Export de « {a_exporter['titre']} »"
+            base = job["pct"]
+
             def prog(pct):
-                job["pct"] = pct
+                job["pct"] = base + int(pct * (100 - base) / 100)
             montage.exporter_clip(p["source"], p["segments"], a_exporter, sortie, prog,
-                                  avec_son=a_du_son(p["source"]) is not False)
+                                  avec_son=a_du_son(p["source"]) is not False, vision=p.get("vision"))
             job["resultat"] = sortie
             taille = montage.dimensions(sortie)
             format_ = f" — {taille[0]}×{taille[1]}" + (" (format TikTok ✔)" if taille[0] < taille[1] else "") if taille else ""
@@ -551,7 +622,7 @@ def liste_projets():
         res.append({"id": pid, "nom": p["nom"], "cree": p["cree"], "etat": p["etat"], "progression": progression,
                     "clips": len(p["clips"]), "exportes": sum(1 for c in p["clips"] if c.get("exporte")),
                     "premier": p["clips"][0]["id"] if p["clips"] else None})
-    res.sort(key=lambda x: x["cree"], reverse=True)
+    res.sort(key=lambda x: str(x["cree"]), reverse=True)   # un vieux projet peut avoir une date au format différent
     return jsonify(res)
 
 
@@ -748,7 +819,10 @@ def modifier_clip(pid, cid):
         else:
             c["exporte"] = None
         sauver(p)
-        return jsonify(vue_clip(c, p))
+        vue = vue_clip(c, p)
+    if "debut" in d or "fin" in d:
+        job_vision(pid)
+    return jsonify(vue)
 
 
 @app.post("/api/projets/<pid>/clips/<cid>/appliquer-a-tous")

@@ -265,6 +265,7 @@ function fusionner(e) {
     }
     if (j.etat === "fini" && j.type === "export") toast("Clip exporté ✔");
     if (j.etat === "fini" && j.type === "apercu") rechargerVideo();
+    if (j.etat === "fini" && j.type === "vision") dernierDessin = "";
     if (j.etat === "erreur" && j.type !== "analyse") toast(`Problème : ${j.erreur}`);
   }
   if (!clip()) { cur = P.clips[0]?.id || null; apresChangementDeClip(); }
@@ -302,7 +303,9 @@ function afficherClips(reconstruire) {
     el.classList.toggle("actif", c.id === cur);
     $(".clip-titre", el).textContent = c.titre;
     const job = P.jobs.find((j) => j.clip === c.id && j.type === "export" && j.etat === "en_cours");
-    $(".clip-meta", el).innerHTML = `<span>${fmtCourt(P.segments ? dureeMontee(calculerBlocs(c)) : c.fin - c.debut)}</span><span>★ ${Math.round(c.note)}</span>${c.exporte ? '<span class="ok">✔ exporté</span>' : ""}`;
+    const duree = P.segments ? dureeMontee(calculerBlocs(c)) : c.fin - c.debut;
+    const court = duree < 60 ? `<span class="court" title="TikTok ne rémunère que les vidéos de plus d'1 minute">moins d'1 min</span>` : "";
+    $(".clip-meta", el).innerHTML = `<span>${fmtCourt(duree)}</span><span>★ ${Math.round(c.note)}</span>${court}${c.exporte ? '<span class="ok">✔ exporté</span>' : ""}`;
     const pr = $(".clip-progression", el);
     pr.hidden = !job; if (job) $("i", pr).style.width = `${job.pct}%`;
     const vign = $(".clip-vignette", el), url = `/miniature/${P.id}/${c.id}?d=${c.debut}`;
@@ -368,7 +371,7 @@ $("#btn-arreter").addEventListener("click", () => uneFois("arreter", async () =>
 }));
 
 function afficherJobs() {
-  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres" };
+  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres", vision: "Image" };
   const actifs = P.jobs.filter((j) => j.etat === "en_cours" && j.type !== "analyse");
   // regroupés par type : 30 exports = une seule pastille « Export 3/30 »
   const parType = {};
@@ -481,7 +484,7 @@ const MOTS_VIDES = new Set(("alors aussi avait avant avec cette comme comment da
   "tout toute toutes tous très trop vais votre vous about after again because before being could their there these thing think " +
   "those would really right").split(" "));
 const normMot = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}_]/gu, "");
-const montageDe = (c) => ({ coupes: true, zooms: true, anim: true, accroche: true, barre: true, ...(c?.montage || {}) });
+const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, ...(c?.montage || {}) });
 let blocs = [], plans = [];
 
 function motsDuPassage(debut, fin) {
@@ -559,7 +562,7 @@ function preparerMontage() {
 /* Accroche + barre + zoom, dessinés à chaque image de l'aperçu */
 function rendreHabillage(c, tSortie) {
   const m = montageDe(c), echelle = ecran.clientHeight / 1920;
-  const z = m.zooms ? zoomA(tSortie) : 1;
+  const z = m.zooms && !c.cadrages?.length ? zoomA(tSortie) : 1;   // avec un plan de cadrage, les zooms y sont déjà
   $("#calque").style.transform = z !== 1 ? `scale(${z})` : "";
   const acc = $("#accroche"), texte = ((c.texte?.contenu || "").trim() || c.titre || "").toLocaleUpperCase("fr-FR");
   const voir = m.accroche && texte && tSortie < DUREE_ACCROCHE && !libre;
@@ -640,6 +643,57 @@ function rendreSousTitre(t) {
   }).join(" ");
 }
 
+/* =================== Cadrage intelligent : le même plan que l'export (vision.py) ===================
+   Chaque plan : « rect » (un recadrage 9:16), « flou » (contenu entier sur fond flouté)
+   ou « partage » (l'info en haut, le visage en bas). La vidéo ne sert que de source d'images. */
+const rendu = $("#rendu"), ctxRendu = rendu.getContext("2d");
+const tampon = document.createElement("canvas"); tampon.width = 72; tampon.height = 128;
+const ctxTampon = tampon.getContext("2d");
+const ST_DEFAUT = 68, TI_DEFAUT = 11;
+let dernierDessin = "";
+function planA(c, t) {
+  const pl = c?.cadrages;
+  if (!pl?.length) return null;
+  return pl.find((p) => t >= p.de - 0.02 && t < p.a) || (t < pl[0].de ? pl[0] : pl[pl.length - 1]);
+}
+function rendreCadrage(c, t) {
+  const plan = planA(c, t);
+  ecran.classList.toggle("canvas", !!plan);
+  if (!plan || video.readyState < 2 || !video.videoWidth) return plan;
+  const W = Math.round(ecran.clientWidth * Math.min(2, window.devicePixelRatio || 1)), H = Math.round(W * 16 / 9);
+  const cle = `${video.currentTime}|${JSON.stringify(plan)}|${W}`;
+  if (cle === dernierDessin && video.paused) return plan;
+  dernierDessin = cle;
+  if (rendu.width !== W || rendu.height !== H) { rendu.width = W; rendu.height = H; }
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const src = (r) => [r[0] * vw, r[1] * vh, Math.max(1, r[2] * vw), Math.max(1, r[3] * vh)];
+  ctxRendu.fillStyle = "#000"; ctxRendu.fillRect(0, 0, W, H);
+  if (plan.type === "partage") {
+    ctxRendu.drawImage(video, ...src(plan.r), 0, 0, W, H / 2);
+    ctxRendu.drawImage(video, ...src(plan.r2), 0, H / 2, W, H / 2);
+    ctxRendu.fillRect(0, H / 2 - H * 3 / 1920, W, H * 6 / 1920);
+  } else if (plan.type === "flou") {
+    let fw = vw, fh = vw * 16 / 9;
+    if (fh > vh) { fh = vh; fw = vh * 9 / 16; }
+    ctxTampon.drawImage(video, (vw - fw) / 2, (vh - fh) / 2, fw, fh, 0, 0, 72, 128);   // petite image agrandie = flou
+    ctxRendu.filter = "blur(4px) brightness(.8)";
+    ctxRendu.drawImage(tampon, -W * 0.06, -H * 0.06, W * 1.12, H * 1.12);
+    ctxRendu.filter = "none";
+    const [sx, sy, sw, sh] = src(plan.r), k = Math.min(W / sw, H / sh);
+    ctxRendu.drawImage(video, sx, sy, sw, sh, (W - sw * k) / 2, (H - sh * k) / 2, sw * k, sh * k);
+  } else {
+    ctxRendu.drawImage(video, ...src(plan.r), 0, 0, W, H);
+  }
+  return plan;
+}
+/* Le texte s'écarte de l'info montrée (si la personne n'a pas placé le texte elle-même) */
+function placerTextesSelonPlan(c, plan) {
+  const st = plan?.st != null && c.style.position === ST_DEFAUT ? plan.st : c.style.position;
+  $("#soustitre").style.top = `${st}%`;
+  const tx = c.texte || {}, pos = tx.position ?? TI_DEFAUT;
+  if (tx.titre || tx.partie) $("#titre-ecran").style.top = `${plan?.ti != null && pos === TI_DEFAUT ? plan.ti : pos}%`;
+}
+
 const fond = $("#fond"), ctxFond = fond.getContext("2d");
 let dernierFond = 0;
 function boucle(now) {
@@ -662,9 +716,11 @@ function boucle(now) {
   rendreSousTitre(t);
   const tSortie = versSortie(t, blocs);
   rendreHabillage(c, tSortie);
+  const plan = rendreCadrage(c, t);
+  if (!deplace) placerTextesSelonPlan(c, plan);
   $("#t-actuel").textContent = fmt(libre ? t - c.debut : tSortie);
   $("#tl-tete").style.left = `${pos(t)}%`;
-  if (c.cadrage.mode === "flou" && now - dernierFond > 90 && video.readyState >= 2 && video.videoWidth) {
+  if (c.cadrage.mode === "flou" && !c.cadrages?.length && now - dernierFond > 90 && video.readyState >= 2 && video.videoWidth) {
     dernierFond = now;
     const vw = video.videoWidth, vh = video.videoHeight, r = 9 / 16;
     let sw = vw, sh = vw / r;
@@ -803,6 +859,11 @@ function remplirReglages(c) {
   $("#r-maj").textContent = s.majuscules ? "AA" : "Aa";
   const cad = c.cadrage;
   $$("#r-cadrage button").forEach((b) => b.classList.toggle("choisi", b.dataset.v === cad.mode));
+  const auto = cad.auto !== false;
+  $("#r-auto").setAttribute("aria-pressed", String(auto));
+  $("#aide-auto").textContent = auto
+    ? "Suit le visage et montre les infos affichées (article, capture…) ; écran partagé quand il y a les deux. Choix ci-dessous = quand il n'y a ni l'un ni l'autre."
+    : "Cadrage fixe sur tout le clip.";
   ecran.classList.toggle("remplir", cad.mode === "remplir");
   video.style.objectPosition = `${50 + cad.decalage}% 50%`;
   $("#ligne-decalage").hidden = cad.mode !== "remplir";
@@ -882,9 +943,12 @@ function changerStyle(partiel) {
 function changerCadrage(partiel) {
   const c = clip(); if (!c) return;
   Object.assign(c.cadrage, partiel);
+  if (c.cadrage.auto === false || "auto" in partiel) c.cadrages = [];   // l'ancien plan ne vaut plus : le serveur renvoie le nouveau
   remplirReglages(c);
-  planifierPatch({ cadrage: partiel });
+  dernierDessin = "";
+  planifierPatch({ cadrage: { auto: c.cadrage.auto !== false, ...partiel } });
 }
+$("#r-auto").addEventListener("click", () => changerCadrage({ auto: clip()?.cadrage.auto === false }));
 
 $("#r-police").addEventListener("change", (e) => changerStyle({ police: e.target.value }));
 $("#r-taille").addEventListener("input", (e) => changerStyle({ taille: +e.target.value }));

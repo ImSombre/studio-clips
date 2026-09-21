@@ -118,6 +118,7 @@
                 <canvas id="fond" width="72" height="128"></canvas>
                 <video id="lecteur" preload="auto" playsinline></video>
               </div>
+              <canvas id="rendu" class="rendu" width="360" height="640"></canvas>
               <div id="accroche" class="accroche" hidden></div>
               <div id="barre-prog" class="barre-prog" hidden><i></i></div>
               <div id="titre-ecran" class="titre-ecran"></div>
@@ -204,6 +205,10 @@
 
             <div class="groupe">
               <div class="groupe-titre">Cadrage</div>
+              <div class="ligne">
+                <button type="button" class="bascule" id="r-auto" aria-pressed="true">✨ Cadrage intelligent</button>
+              </div>
+              <p class="aide" id="aide-auto"></p>
               <div class="ligne">
                 <div class="segmente large" id="r-cadrage">
                   <button type="button" data-v="remplir">Plein écran (TikTok)</button>

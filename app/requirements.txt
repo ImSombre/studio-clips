@@ -3,3 +3,4 @@ requests>=2.31.0
 flask>=3.0
 yt-dlp[default]
 deno
+opencv-python-headless>=4.10
