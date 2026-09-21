@@ -17,21 +17,50 @@ let libre = false;       // lecture hors du clip (après un clic hors zone)
 let glisse = null;       // poignée en cours de déplacement
 let envoiChat = false;
 let minuteurPoll = null, minuteurPatch = null, patchEnAttente = {};
+let patchEnVol = 0;      // PATCH partis mais pas encore revenus : une synchro ne doit pas les écraser
+let echecsServeur = 0;
 const jobsVus = new Set();
+const enCours = new Set();   // actions déjà lancées (anti double-clic)
 
 async function api(url, opts = {}) {
-  const r = await fetch(url, {
-    method: opts.method || (opts.body ? "POST" : "GET"),
-    headers: opts.body ? { "Content-Type": "application/json" } : {},
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let r;
+  try {
+    r = await fetch(url, {
+      method: opts.method || (opts.body ? "POST" : "GET"),
+      headers: opts.body ? { "Content-Type": "application/json" } : {},
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (_) {
+    serveurMuet();
+    throw new Error("Studio Clips ne répond pas.");
+  }
+  serveurRepond();
   if (!r.ok) {
-    let m = `Erreur ${r.status}`;
+    let m = r.status === 404 ? "Ce clip ou ce projet n'existe plus." : "Quelque chose n'a pas marché, réessaie.";
     try { m = (await r.json()).erreur || m; } catch (_) { /* réponse non JSON */ }
     throw new Error(m);
   }
   return r.status === 204 ? null : r.json();
 }
+
+/* Serveur arrêté (PC en veille, plantage…) : on le dit clairement au lieu de paraître figé. */
+function serveurMuet() {
+  echecsServeur++;
+  if (echecsServeur >= 3) $("#hors-ligne").hidden = false;
+}
+function serveurRepond() {
+  echecsServeur = 0;
+  $("#hors-ligne").hidden = true;
+}
+
+/* Une seule exécution à la fois d'une même action (double-clic, touche maintenue…). */
+async function uneFois(cle, fonction) {
+  if (enCours.has(cle)) return;
+  enCours.add(cle);
+  try { await fonction(); } catch (err) { toast(err.message); } finally { enCours.delete(cle); }
+}
+
+addEventListener("unhandledrejection", (e) => { e.preventDefault(); toast(e.reason?.message || "Quelque chose n'a pas marché."); });
 
 function toast(texte) {
   const t = $("#toast");
@@ -53,8 +82,13 @@ const clip = () => P?.clips.find((c) => c.id === cur) || null;
 /* =================== ACCUEIL =================== */
 let cheminChoisi = "";
 
-async function chargerProjets() {
-  const liste = await api("/api/projets");
+async function chargerProjets(essai = 0) {
+  let liste;
+  try { liste = await api("/api/projets"); } catch (_) {
+    // au tout premier lancement le serveur peut mettre quelques secondes : on réessaie
+    if (essai < 10) setTimeout(() => chargerProjets(essai + 1), 1000);
+    return;
+  }
   $("#nb-projets").textContent = liste.length ? `${liste.length}` : "";
   const box = $("#liste-projets");
   if (!liste.length) {
@@ -80,7 +114,7 @@ $("#liste-projets").addEventListener("click", async (e) => {
   if (suppr) {
     e.stopPropagation();
     if (confirm("Supprimer ce projet ? (tes clips déjà exportés ne sont pas touchés)")) {
-      await api(`/api/projets/${suppr.dataset.suppr}`, { method: "DELETE" });
+      try { await api(`/api/projets/${suppr.dataset.suppr}`, { method: "DELETE" }); } catch (err) { toast(err.message); }
       chargerProjets();
     }
     return;
@@ -94,6 +128,8 @@ $("#liste-projets").addEventListener("keydown", (e) => {
 
 $("#btn-choisir").addEventListener("click", async () => {
   const b = $("#btn-choisir");
+  if (b.disabled) return;
+  b.disabled = true;
   $("#nom-video").textContent = "Choix en cours…";
   try {
     const { chemin } = await api("/api/choisir", { body: {} });
@@ -108,6 +144,7 @@ $("#btn-choisir").addEventListener("click", async () => {
       $("#nom-video").textContent = cheminChoisi.split(/[\\/]/).pop();
     }
   } catch (err) { toast(err.message); $("#nom-video").textContent = "Choisir une vidéo"; }
+  b.disabled = false;
   $("#btn-lancer").disabled = !cheminChoisi;
 });
 
@@ -132,7 +169,11 @@ $("#btn-lancer").addEventListener("click", async () => {
 
 /* =================== STUDIO : ouverture / synchro =================== */
 async function ouvrirProjet(id) {
-  P = await api(`/api/projets/${id}`);
+  let charge;
+  try { charge = await api(`/api/projets/${id}`); } catch (err) { toast(`Impossible d'ouvrir ce projet : ${err.message}`); return; }
+  P = charge;
+  envoiChat = false; $(".envoyer").disabled = false;
+  patchEnAttente = {}; $("#idees").hidden = true;
   P.jobs.forEach((j) => jobsVus.add(j.id + j.etat));
   cur = P.clips[0]?.id || null;
   $("#accueil").hidden = true; $("#studio").hidden = false;
@@ -151,27 +192,34 @@ function planifierPoll(ms) {
 
 async function poll() {
   if (!P) return;
+  const pid = P.id;
   try {
-    const e = await api(`/api/projets/${P.id}/etat`);
-    const avaitSegments = P.segments?.length;
+    const e = await api(`/api/projets/${pid}/etat`);
+    if (P?.id !== pid) return;            // on a changé de projet entre-temps
+    serveurRepond();
+    const manqueSegments = P.segments === undefined;
     fusionner(e);
-    if (!avaitSegments && e.etat === "pret") {
-      const complet = await api(`/api/projets/${P.id}`);
-      P.segments = complet.segments; P.duree = complet.duree;
+    if (manqueSegments && e.etat === "pret") {
+      const complet = await api(`/api/projets/${pid}`);
+      if (P?.id !== pid) return;
+      P.segments = complet.segments || []; P.duree = complet.duree;
       toutAfficher(true);
     }
-  } catch (_) { /* serveur momentanément occupé : on réessaie */ }
+  } catch (_) { /* compté par api() : au bout de 3 échecs le bandeau « arrêté » s'affiche */ }
+  if (P?.id !== pid) return;
   const occupe = P && (P.etat === "traitement" || P.jobs.some((j) => j.etat === "en_cours"));
   planifierPoll(occupe ? 1000 : 3500);
 }
 
 function fusionner(e) {
+  if (!P || (e.id && e.id !== P.id)) return;   // réponse d'un autre projet : on l'ignore
   const ancien = clip();
   const anciensIds = P.clips.map((c) => c.id).join();
-  const garde = glisse || deplace || Object.keys(patchEnAttente).length ? ancien : null;
+  const garde = glisse || deplace || patchEnVol || Object.keys(patchEnAttente).length ? ancien : null;
   Object.assign(P, { etat: e.etat, erreur: e.erreur, duree: e.duree ?? P.duree, jobs: e.jobs, source_existe: e.source_existe });
   P.clips = e.clips.map((c) => (garde && c.id === garde.id ? garde : c));
-  const chatChange = (P.chat?.length || 0) !== e.chat.length;
+  const dernier = (l) => (l?.length ? `${l.length}|${l[l.length - 1].t}` : "");
+  const chatChange = dernier(P.chat) !== dernier(e.chat);
   P.chat = e.chat;
 
   // Tâches terminées depuis la dernière synchro
@@ -179,12 +227,14 @@ function fusionner(e) {
     const cle = j.id + j.etat;
     if (jobsVus.has(cle)) continue;
     jobsVus.add(cle);
-    if (j.etat === "fini" && j.type === "nouveau_clip" && j.resultat) { cur = j.resultat; toast("Nouveau clip trouvé"); }
+    if (j.etat === "fini" && j.type === "nouveau_clip" && j.resultat && !glisse && !deplace) {
+      envoyerPatchMaintenant(); cur = j.resultat; apresChangementDeClip(); toast("Nouveau clip trouvé");
+    }
     if (j.etat === "fini" && j.type === "export") toast("Clip exporté ✔");
     if (j.etat === "fini" && j.type === "apercu") rechargerVideo();
     if (j.etat === "erreur" && j.type !== "analyse") toast(`Problème : ${j.erreur}`);
   }
-  if (!clip()) cur = P.clips[0]?.id || null;
+  if (!clip()) { cur = P.clips[0]?.id || null; apresChangementDeClip(); }
 
   const nouveau = clip();
   const bornesChangees = !ancien || !nouveau || ancien.id !== nouveau.id || ancien.debut !== nouveau.debut || ancien.fin !== nouveau.fin;
@@ -227,12 +277,22 @@ function afficherClips(reconstruire) {
   });
 }
 
+/* Tout changement de clip passe par ici : modifs envoyées au BON clip, état remis à zéro. */
+function apresChangementDeClip() {
+  libre = false; glisse = null;
+  if (typeof deplace !== "undefined") deplace = null;
+  $("#idees").hidden = true;
+  const c = clip();
+  if (c && video.readyState >= 1) { try { video.currentTime = c.debut; } catch (_) { /* vidéo pas prête */ } }
+}
+
 $("#liste-clips").addEventListener("click", (e) => {
   const b = e.target.closest(".clip"); if (!b || b.dataset.id === cur) return;
   envoyerPatchMaintenant();
-  cur = b.dataset.id; libre = false; $("#idees").hidden = true;
+  cur = b.dataset.id;
+  apresChangementDeClip();
   afficherClips(false); afficherMontage(true); afficherChat();
-  const v = $("#lecteur"); v.currentTime = clip().debut; v.play().catch(() => {});
+  video.play().catch(() => {});
 });
 
 /* =================== traitement =================== */
@@ -256,16 +316,32 @@ function afficherTraitement() {
   const err = $("#traitement-erreur");
   err.hidden = !P.erreur || enCours; err.textContent = P.erreur || "";
   $("#btn-relancer").hidden = enCours;
+  $("#btn-arreter").hidden = !enCours;
+  $("#btn-retrouver-t").hidden = enCours || P.source_existe !== false;
 }
-$("#btn-relancer").addEventListener("click", async () => {
-  await api(`/api/projets/${P.id}/relancer`, { body: {} });
-  P.etat = "traitement"; afficherTraitement(); planifierPoll(300);
-});
+$("#btn-relancer").addEventListener("click", () => uneFois("relancer", async () => {
+  const pid = P.id;
+  await api(`/api/projets/${pid}/relancer`, { body: {} });
+  if (P?.id !== pid) return;
+  P.etat = "traitement"; P.erreur = null; afficherTraitement(); planifierPoll(300);
+}));
+$("#btn-arreter").addEventListener("click", () => uneFois("arreter", async () => {
+  if (!confirm("Arrêter le traitement en cours ? Tu pourras le relancer plus tard.")) return;
+  await api(`/api/projets/${P.id}/arreter`, { body: {} });
+  toast("Arrêt demandé…"); planifierPoll(500);
+}));
 
 function afficherJobs() {
   const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres" };
-  $("#jobs-barre").innerHTML = P.jobs.filter((j) => j.etat === "en_cours" && j.type !== "analyse")
-    .map((j) => `<span class="job-pilule">${libelles[j.type] || j.type}<i style="--p:${j.pct}%"></i>${j.pct}%</span>`).join("");
+  const actifs = P.jobs.filter((j) => j.etat === "en_cours" && j.type !== "analyse");
+  // regroupés par type : 30 exports = une seule pastille « Export 3/30 »
+  const parType = {};
+  for (const j of actifs) (parType[j.type] ||= []).push(j);
+  $("#jobs-barre").innerHTML = Object.entries(parType).map(([type, liste]) => {
+    const j = liste.find((x) => x.pct > 0) || liste[0];
+    const compte = liste.length > 1 ? ` ×${liste.length}` : "";
+    return `<span class="job-pilule">${libelles[type] || type}${compte}<i style="--p:${j.pct}%"></i>${j.pct}%</span>`;
+  }).join("");
 }
 
 /* =================== montage : lecteur =================== */
@@ -287,10 +363,13 @@ function afficherMontage(bornesChangees) {
     video.src = `/media/${P.id}?v=${Date.now()}`;
     video.currentTime = c.debut;
   }
-  if (!P.source_existe) {
-    $("#apercu-msg").hidden = false;
-    $("#apercu-msg").textContent = "Vidéo d'origine introuvable : elle a été déplacée ou renommée.";
+  if (P.source_existe === false) {
+    afficherMessageVideo("Vidéo d'origine introuvable : elle a été déplacée, renommée ou la clé USB est débranchée.", true);
+  } else if ($("#apercu-msg").dataset.introuvable) {
+    $("#apercu-msg").hidden = true; delete $("#apercu-msg").dataset.introuvable;
   }
+  const bloque = P.source_existe === false;
+  $("#btn-exporter").title = $("#btn-tout").title = bloque ? "Vidéo d'origine introuvable" : "";
   calculerSousTitres();
   remplirReglages(c);
   if (bornesChangees) { calculerFenetre(); dessinerTimeline(); }
@@ -298,13 +377,49 @@ function afficherMontage(bornesChangees) {
   $("#chat-contexte").textContent = `Clip ${P.clips.indexOf(c) + 1} · ${fmtCourt(c.fin - c.debut)}`;
 }
 
-video.addEventListener("error", async () => {
-  if (!P || !video.dataset.src) return;
-  $("#apercu-msg").hidden = false;
-  $("#apercu-msg").textContent = "Ce format ne se lit pas directement : je prépare un aperçu, un instant…";
-  try { await api(`/api/projets/${P.id}/apercu`, { body: {} }); planifierPoll(500); } catch (_) { /* affiché via les tâches */ }
-});
+function afficherMessageVideo(texte, introuvable = false) {
+  const m = $("#apercu-msg");
+  m.hidden = false;
+  m.innerHTML = echap(texte) + (introuvable ? ` <button type="button" class="bouton-contour petit" data-retrouver>Retrouver la vidéo</button>` : "");
+  if (introuvable) m.dataset.introuvable = "1"; else delete m.dataset.introuvable;
+}
+
+async function retrouverVideo() {
+  await uneFois("retrouver", async () => {
+    const pid = P.id;
+    const e = await api(`/api/projets/${pid}/retrouver`, { body: {} });
+    if (P?.id !== pid || !e || e.ok === false) return;
+    fusionner(e);
+    delete $("#apercu-msg").dataset.introuvable;
+    rechargerVideo();
+    toast("Vidéo retrouvée ✔");
+  });
+}
+document.addEventListener("click", (e) => { if (e.target.closest("[data-retrouver]")) retrouverVideo(); });
+
+let apercuTente = null;   // on ne demande l'aperçu qu'une fois par projet
+async function demanderApercu() {
+  if (!P || P.source_existe === false) return;
+  if (apercuTente === P.id) {
+    afficherMessageVideo("Cette vidéo ne peut pas s'afficher ici, mais l'export fonctionne quand même.");
+    return;
+  }
+  apercuTente = P.id;
+  afficherMessageVideo("Ce format ne se lit pas directement : je prépare un aperçu, un instant…");
+  try {
+    const r = await api(`/api/projets/${P.id}/apercu`, { body: {} });
+    if (r?.existe) rechargerVideo(); else planifierPoll(500);
+  } catch (err) { afficherMessageVideo(err.message, P.source_existe === false); }
+}
+video.addEventListener("error", () => { if (P && video.dataset.src) demanderApercu(); });
+// vidéo HEVC (iPhone) : le son passe mais l'image reste noire, sans erreur -> on bascule sur l'aperçu
+video.addEventListener("loadeddata", () => { if (P && video.videoWidth === 0 && video.videoHeight === 0) demanderApercu(); });
 video.addEventListener("loadedmetadata", () => { const c = clip(); if (c && video.currentTime < 0.1) video.currentTime = c.debut; });
+video.addEventListener("ended", () => {
+  const c = clip(); if (!c) return;
+  video.currentTime = c.debut;
+  if ($("#boucle").checked) video.play().catch(() => {});
+});
 video.addEventListener("play", () => { ecran.classList.remove("pause"); $("#btn-play").classList.add("lecture"); });
 video.addEventListener("pause", () => { ecran.classList.add("pause"); $("#btn-play").classList.remove("lecture"); });
 ecran.classList.add("pause");
@@ -312,8 +427,9 @@ ecran.classList.add("pause");
 function basculerLecture() {
   const c = clip(); if (!c) return;
   if (video.paused) {
-    if (video.currentTime < c.debut - 0.05 || video.currentTime >= c.fin - 0.05) { video.currentTime = c.debut; libre = false; }
-    else libre = video.currentTime < c.debut || video.currentTime > c.fin;
+    const fin = Number.isFinite(video.duration) ? Math.min(c.fin, video.duration) : c.fin;
+    if (libre) { /* écoute libre hors du clip : on repart d'où on est */ }
+    else if (video.ended || video.currentTime < c.debut - 0.05 || video.currentTime >= fin - 0.05) video.currentTime = c.debut;
     video.play().catch(() => {});
   } else video.pause();
 }
@@ -382,7 +498,8 @@ function boucle(now) {
   const c = clip();
   if (!c || $("#montage").hidden) return;
   let t = video.currentTime;
-  if (!video.paused && !libre && !glisse && t >= c.fin - 0.02) {
+  const finReelle = Number.isFinite(video.duration) ? Math.min(c.fin, video.duration) : c.fin;
+  if (!video.paused && !libre && !glisse && t >= finReelle - 0.02) {
     if ($("#boucle").checked) { video.currentTime = c.debut; t = c.debut; }
     else { video.pause(); video.currentTime = c.debut; t = c.debut; }
   }
@@ -448,6 +565,7 @@ $("#tl-piste").addEventListener("pointerdown", (e) => {
   const p = e.target.closest(".poignee");
   if (p) {
     glisse = p.dataset.p;
+    glisse_depart = { debut: c.debut, fin: c.fin, clip: c.id };
     e.target.setPointerCapture(e.pointerId);
     video.pause();
     return;
@@ -464,13 +582,22 @@ $("#tl-piste").addEventListener("pointermove", (e) => {
   video.currentTime = glisse === "debut" ? c.debut : c.fin;
   calculerSousTitres(); majZone();
 });
-$("#tl-piste").addEventListener("pointerup", () => {
+let glisse_depart = null;
+function finGlisse() {
   if (!glisse) return;
   const c = clip(); glisse = null;
-  planifierPatch({ debut: c.debut, fin: c.fin }, 0);
+  if (!c) return;
+  // un simple clic sans déplacement ne doit rien envoyer (ni effacer « exporté », ni remplir l'historique)
+  if (glisse_depart && glisse_depart.clip === c.id && (glisse_depart.debut !== c.debut || glisse_depart.fin !== c.fin)) {
+    planifierPatch({ debut: c.debut, fin: c.fin }, 0);
+  }
+  glisse_depart = null;
   calculerFenetre(); dessinerTimeline();
   video.currentTime = c.debut;
-});
+}
+$("#tl-piste").addEventListener("pointerup", finGlisse);
+$("#tl-piste").addEventListener("pointercancel", finGlisse);
+$("#tl-piste").addEventListener("lostpointercapture", finGlisse);
 
 $(".bornes").addEventListener("click", (e) => {
   const b = e.target.closest("button"); const c = clip(); if (!b || !c) return;
@@ -507,7 +634,8 @@ function remplirReglages(c) {
   if (actif !== $("#r-position")) $("#r-position").value = s.position;
   $("#v-position").textContent = `${Math.round(s.position)}%`;
   $$("#r-couleur .pastille").forEach((b) => b.classList.toggle("choisie", b.dataset.v.toUpperCase() === s.couleur.toUpperCase()));
-  $$("#r-surligne .pastille").forEach((b) => b.classList.toggle("choisie", b.dataset.v.toUpperCase() === (s.surligne || "").toUpperCase()));
+  const surligne = s.surligne === "aucun" ? "" : (s.surligne || "");
+  $$("#r-surligne .pastille").forEach((b) => b.classList.toggle("choisie", b.dataset.v.toUpperCase() === surligne.toUpperCase()));
   $$("#r-mots button").forEach((b) => b.classList.toggle("choisi", +b.dataset.v === s.mots));
   $("#r-maj").setAttribute("aria-pressed", String(!!s.majuscules));
   $("#r-maj").textContent = s.majuscules ? "AA" : "Aa";
@@ -542,7 +670,7 @@ function rendreTitre(c) {
   el.style.top = `${tx.position ?? 11}%`;
   el.style.fontSize = `${(tx.taille || 56) * 0.92 * echelle}px`;
   const lignes = [];
-  if (tx.partie) lignes.push(`<span class="te-partie">PARTIE ${tx.numero || c.numero || 1}</span>`);
+  if (tx.partie) lignes.push(`<span class="te-partie">PARTIE ${echap(tx.numero || c.numero || 1)}</span>`);
   if (tx.titre) lignes.push(echap((tx.contenu || "").trim() || c.titre));
   el.innerHTML = `<span class="te-bloc">${lignes.join("<br>")}</span>`;
 }
@@ -572,7 +700,7 @@ function majEtatExport(c) {
   const box = $("#export-etat");
   $("#btn-exporter").disabled = !!job;
   if (job) box.textContent = `${job.etape}… ${job.pct} %`;
-  else if (c.exporte) box.innerHTML = `✔ Exporté — <a data-ouvrir>ouvrir le fichier</a>`;
+  else if (c.exporte) box.innerHTML = `✔ Exporté — <button type="button" class="lien" data-ouvrir>ouvrir le fichier</button>`;
   else box.textContent = "";
 }
 $("#export-etat").addEventListener("click", (e) => {
@@ -615,57 +743,84 @@ function planifierPatch(partiel, delai = 400) {
   clearTimeout(minuteurPatch);
   minuteurPatch = setTimeout(envoyerPatchMaintenant, delai);
 }
-async function envoyerPatchMaintenant() {
+async function envoyerPatchMaintenant(essai = 0) {
   clearTimeout(minuteurPatch);
   const corps = patchEnAttente; patchEnAttente = {};
   const cid = corps.__clip; delete corps.__clip;
-  if (!cid || !Object.keys(corps).length) return;
+  if (!P || !cid || !Object.keys(corps).length) return;
+  const pid = P.id;
+  patchEnVol++;
   try {
-    const maj = await api(`/api/projets/${P.id}/clips/${cid}`, { method: "PATCH", body: corps });
-    if (Object.keys(patchEnAttente).length) return;   // d'autres modifs arrivent : on garde l'état local
+    const maj = await api(`/api/projets/${pid}/clips/${cid}`, { method: "PATCH", body: corps });
+    if (P?.id !== pid || Object.keys(patchEnAttente).length) return;   // autre projet, ou d'autres modifs arrivent
     const i = P.clips.findIndex((c) => c.id === cid);
     if (i >= 0) P.clips[i] = maj;
     if (cid === cur) { remplirReglages(maj); majZone(); }
     afficherClips(false);
-  } catch (err) { toast(err.message); }
+  } catch (err) {
+    if (/n'existe plus/.test(err.message)) return;   // clip supprimé entre-temps : rien à garder
+    if (P?.id === pid && essai < 3) {
+      // on remet la modif dans la file (sans écraser une modif plus récente) et on réessaie
+      for (const [k, v] of Object.entries(corps)) {
+        if (!(k in patchEnAttente)) patchEnAttente[k] = v;
+        else if (typeof v === "object" && v) patchEnAttente[k] = { ...v, ...patchEnAttente[k] };
+      }
+      patchEnAttente.__clip ||= cid;
+      clearTimeout(minuteurPatch);
+      minuteurPatch = setTimeout(() => envoyerPatchMaintenant(essai + 1), 1500 * (essai + 1));
+    } else toast("Une modification n'a pas pu être enregistrée.");
+  } finally { patchEnVol--; }
 }
 
 $("#btn-annuler").addEventListener("click", annulerModif);
-async function annulerModif() {
-  const c = clip(); if (!c) return;
-  await envoyerPatchMaintenant();
-  const maj = await api(`/api/projets/${P.id}/clips/${c.id}/annuler`, { body: {} });
-  P.clips[P.clips.findIndex((x) => x.id === c.id)] = maj;
-  calculerSousTitres(); afficherClips(false); afficherMontage(true);
-  video.currentTime = maj.debut;
-  toast("Modif annulée");
+function annulerModif() {
+  return uneFois("annuler", async () => {
+    const c = clip(); if (!c || !c.peut_annuler) return;
+    const pid = P.id;
+    await envoyerPatchMaintenant();
+    const maj = await api(`/api/projets/${pid}/clips/${c.id}/annuler`, { body: {} });
+    if (P?.id !== pid) return;
+    const i = P.clips.findIndex((x) => x.id === c.id);
+    if (i >= 0) P.clips[i] = maj;
+    calculerSousTitres(); afficherClips(false); afficherMontage(true);
+    if (cur === c.id) video.currentTime = maj.debut;
+    toast(maj.annule ? "Modif annulée" : "Rien à annuler");
+  });
 }
-$("#btn-suppr").addEventListener("click", async () => {
+$("#btn-suppr").addEventListener("click", () => uneFois("suppr", async () => {
   const c = clip(); if (!c || !confirm(`Supprimer le clip « ${c.titre} » ?`)) return;
-  await api(`/api/projets/${P.id}/clips/${c.id}`, { method: "DELETE" });
-  const i = P.clips.indexOf(c);
-  P.clips.splice(i, 1);
-  cur = (P.clips[i] || P.clips[i - 1])?.id || null;
+  const pid = P.id, id = c.id;
+  if (patchEnAttente.__clip === id) { clearTimeout(minuteurPatch); patchEnAttente = {}; }
+  await api(`/api/projets/${pid}/clips/${id}`, { method: "DELETE" });
+  if (P?.id !== pid) return;
+  const i = P.clips.findIndex((x) => x.id === id);
+  if (i >= 0) P.clips.splice(i, 1);
+  cur = (P.clips[Math.max(0, i)] || P.clips[i - 1])?.id || null;
+  apresChangementDeClip();
   toutAfficher(true);
-});
-$("#btn-exporter").addEventListener("click", async () => {
+}));
+$("#btn-exporter").addEventListener("click", () => uneFois("exporter", async () => {
+  if (P.source_existe === false) { toast("La vidéo d'origine est introuvable : clique sur « Retrouver la vidéo »."); return; }
+  $("#btn-exporter").disabled = true;
   await envoyerPatchMaintenant();
   const job = await api(`/api/projets/${P.id}/clips/${cur}/exporter`, { body: {} });
-  P.jobs.push(job); majEtatExport(clip()); afficherJobs(); planifierPoll(400);
-});
-$("#btn-tout").addEventListener("click", async () => {
+  if (!P.jobs.some((j) => j.id === job.id)) P.jobs.push(job);
+  majEtatExport(clip()); afficherJobs(); planifierPoll(400);
+}).finally(() => { if (clip()) majEtatExport(clip()); }));
+$("#btn-tout").addEventListener("click", () => uneFois("tout", async () => {
   if (!P.clips.length) return;
+  if (P.source_existe === false) { toast("La vidéo d'origine est introuvable : clique sur « Retrouver la vidéo »."); return; }
   await envoyerPatchMaintenant();
   const nouveaux = await api(`/api/projets/${P.id}/exporter-tout`, { body: {} });
-  P.jobs.push(...nouveaux); afficherJobs(); planifierPoll(400);
-  toast(`${nouveaux.length} clip(s) en cours d'export`);
-});
-$("#btn-dossier").addEventListener("click", () => api(`/api/projets/${P.id}/ouvrir`, { body: {} }));
+  P.jobs.push(...nouveaux.filter((n) => !P.jobs.some((j) => j.id === n.id))); afficherJobs(); planifierPoll(400);
+  toast(nouveaux.length ? `${nouveaux.length} clip(s) en cours d'export` : "Tous les clips sont déjà exportés ✔");
+}));
+$("#btn-dossier").addEventListener("click", () => uneFois("dossier", () => api(`/api/projets/${P.id}/ouvrir`, { body: {} })));
 $("#btn-retour").addEventListener("click", async () => {
   await envoyerPatchMaintenant();
   clearTimeout(minuteurPoll);
   video.pause();
-  P = null; cur = null;
+  P = null; cur = null; envoiChat = false; $(".envoyer").disabled = false;
   $("#studio").hidden = true; $("#accueil").hidden = false;
   chargerProjets();
 });
@@ -682,34 +837,48 @@ function afficherChat() {
   fil.scrollTop = fil.scrollHeight;
 }
 
+function chatDisponible() {
+  if (!P) return false;
+  if (P.etat === "traitement") { toast("Attends la fin de l'analyse de la vidéo, puis je suis à toi."); return false; }
+  if (envoiChat) { toast("Je réponds encore au message précédent…"); return false; }
+  return true;
+}
+
 async function envoyerMessage(texte) {
   texte = texte.trim();
-  if (!texte || envoiChat || !P) return;
+  if (!texte || !chatDisponible()) return false;
+  const pid = P.id, cid = cur;
   await envoyerPatchMaintenant();
   const avant = clip() ? { debut: clip().debut, fin: clip().fin } : null;
-  P.chat.push({ role: "moi", texte, cid: cur });
+  P.chat.push({ role: "moi", texte, cid, t: Date.now() / 1000 });
   envoiChat = true; $(".envoyer").disabled = true;
   afficherChat();
   try {
-    const e = await api(`/api/projets/${P.id}/chat`, { body: { clip: cur, message: texte } });
+    const e = await api(`/api/projets/${pid}/chat`, { body: { clip: cid, message: texte } });
+    if (P?.id !== pid) return true;       // on a quitté le projet entre-temps
     envoiChat = false;
     fusionner(e);
     afficherChat();
+    if (cur !== cid) { toast("L'assistant a répondu sur un autre clip."); return true; }
     if (e.propositions) afficherIdees(e.propositions);
     const c = clip();
     if (c && avant && (c.debut !== avant.debut || c.fin !== avant.fin)) {
       libre = false; video.currentTime = c.debut; video.play().catch(() => {});
     }
   } catch (err) {
-    envoiChat = false; P.chat.push({ role: "ia", texte: `Oups : ${err.message}`, cid: cur }); afficherChat();
+    if (P?.id !== pid) return true;
+    envoiChat = false; P.chat.push({ role: "ia", texte: err.message, cid, t: Date.now() / 1000 }); afficherChat();
+  } finally {
+    if (P?.id === pid) { envoiChat = false; $(".envoyer").disabled = false; planifierPoll(500); }
   }
-  $(".envoyer").disabled = false;
-  planifierPoll(500);
+  return true;
 }
 
-$("#form-chat").addEventListener("submit", (e) => {
+$("#form-chat").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const ta = $("#message"); const t = ta.value; ta.value = ""; ta.style.height = "";
+  const ta = $("#message"); const t = ta.value;
+  if (!t.trim() || !chatDisponible()) return;   // le texte reste dans la zone si on ne peut pas l'envoyer
+  ta.value = ""; ta.style.height = "";
   envoyerMessage(t);
 });
 $("#message").addEventListener("keydown", (e) => {
@@ -721,13 +890,16 @@ $("#puces-chat").addEventListener("click", (e) => { const b = e.target.closest("
 /* =================== clavier =================== */
 document.addEventListener("keydown", (e) => {
   if (!P || $("#studio").hidden) return;
-  const tag = document.activeElement?.tagName;
-  if (tag === "TEXTAREA" || (tag === "INPUT" && document.activeElement.type !== "range" && document.activeElement.type !== "checkbox")) return;
+  const el = document.activeElement, tag = el?.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable
+      || (tag === "INPUT" && el.type !== "range" && el.type !== "checkbox")) return;
   const c = clip(); if (!c) return;
-  if (e.code === "Space") { e.preventDefault(); basculerLecture(); }
+  if (e.code === "Space" && tag !== "BUTTON") { e.preventDefault(); basculerLecture(); }
+  else if (tag === "BUTTON" || e.ctrlKey || e.altKey || e.metaKey) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.repeat) { e.preventDefault(); annulerModif(); }
+  }
   else if (e.key === "i" || e.key === "I") $('[data-ici="debut"]').click();
   else if (e.key === "o" || e.key === "O") $('[data-ici="fin"]').click();
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); annulerModif(); }
 });
 
 /* =================== déplacer le titre / les sous-titres à la souris =================== */
@@ -746,7 +918,7 @@ for (const [id, quoi] of [["#soustitre", "sous"], ["#titre-ecran", "titre"]]) {
     const c = clip(); if (!c || !el.textContent.trim() || e.target.closest(".te-edit")) return;
     e.preventDefault(); e.stopPropagation();
     el.setPointerCapture(e.pointerId);
-    deplace = { quoi, y0: e.clientY, pos0: positionDe(quoi, c) };
+    deplace = { quoi, y0: e.clientY, pos0: positionDe(quoi, c), clip: c.id };
     el.classList.add("deplace");
   });
   el.addEventListener("pointermove", (e) => {
@@ -756,11 +928,13 @@ for (const [id, quoi] of [["#soustitre", "sous"], ["#titre-ecran", "titre"]]) {
   });
   const lacher = () => {
     if (!deplace || deplace.quoi !== quoi) return;
-    const c = clip(); deplace = null; el.classList.remove("deplace");
+    const c = clip(), depart = deplace; deplace = null; el.classList.remove("deplace");
+    if (!c || c.id !== depart.clip || positionDe(quoi, c) === depart.pos0) return;   // simple clic : rien à envoyer
     planifierPatch(quoi === "sous" ? { style: { position: c.style.position } } : { texte: { position: c.texte.position } }, 0);
   };
   el.addEventListener("pointerup", lacher);
   el.addEventListener("pointercancel", lacher);
+  el.addEventListener("lostpointercapture", lacher);
   el.addEventListener("wheel", (e) => {
     const c = clip(); if (!c || !el.textContent.trim()) return;
     e.preventDefault();
@@ -878,7 +1052,14 @@ verifierMaj(); setInterval(verifierMaj, 30 * 60 * 1000);
 /* =================== vie de la fenêtre =================== */
 const ping = () => fetch("/api/ping", { method: "POST" }).catch(() => {});
 ping(); setInterval(ping, 20000);
-addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
+addEventListener("pagehide", () => {
+  // dernière retouche pas encore partie : on l'envoie avant de fermer
+  const corps = { ...patchEnAttente }; const cid = corps.__clip; delete corps.__clip;
+  if (P && cid && Object.keys(corps).length) {
+    navigator.sendBeacon(`/api/projets/${P.id}/clips/${cid}`, new Blob([JSON.stringify(corps)], { type: "application/json" }));
+  }
+  navigator.sendBeacon("/api/bye");
+});
 addEventListener("resize", () => { dernierRendu = ""; rendreTitre(clip()); });
 
 chargerProjets();

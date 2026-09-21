@@ -15,120 +15,142 @@ phrases entières.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 
-from faster_whisper import WhisperModel
+NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Phrases que Whisper « invente » sur de la musique ou du silence (génériques de sous-titrage).
+HALLUCINATIONS = re.compile(
+    r"amara\.org|sous-titr(es|age) (réalisés?|par|fait)|merci d'avoir regardé|abonnez-vous|"
+    r"thanks? for watching|subtitles by|like and subscribe|продолжение следует|字幕", re.I)
+
+
+def _executer(cmd):
+    """FFmpeg/ffprobe : sortie lue en UTF-8 (un emoji dans le nom de fichier ne doit rien casser)."""
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          creationflags=NO_WIN)
 
 
 def get_video_duration(video_path: str):
     """Durée réelle de la vidéo en secondes (via ffprobe), ou None si illisible."""
     try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                video_path,
-            ],
-            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            text=True,
-        )
-        return float(result.stdout.strip())
+        r = _executer(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                       "-of", "default=noprint_wrappers=1:nokey=1", video_path])
+        return float(r.stdout.strip())
     except (OSError, ValueError):
         return None
 
 
+def a_du_son(video_path: str):
+    """True / False, ou None si ffprobe ne sait pas répondre."""
+    try:
+        r = _executer(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                       "-of", "csv=p=0", video_path])
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
+
+
+def codec_video(video_path: str):
+    """Nom du codec de la 1ʳᵉ piste vidéo (« h264 », « hevc »…) ou None."""
+    try:
+        r = _executer(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+                       "-of", "csv=p=0", video_path])
+        return r.stdout.strip().splitlines()[0].strip() or None
+    except (OSError, IndexError):
+        return None
+
+
+def dossier_modeles():
+    """Dossier des modèles Whisper. CTranslate2 lit mal les chemins avec accents :
+    si le profil Windows en contient (« C:\\Users\\Élodie »), on range les modèles ailleurs."""
+    profil = os.path.expanduser("~")
+    if profil.isascii():
+        return None   # emplacement par défaut (cache Hugging Face)
+    racine = os.environ.get("ProgramData", r"C:\ProgramData")
+    dossier = os.path.join(racine, "StudioClips", "whisper")
+    os.makedirs(dossier, exist_ok=True)
+    return dossier
+
+
 def _extract_audio(video_path: str, tmp_dir: str, log) -> str:
     """Extrait l'audio de la vidéo dans un fichier .wav temporaire propre."""
-    # Dossier temporaire propre à ce traitement : deux lancements en même
-    # temps ne se marchent plus dessus.
     tmp_wav = os.path.join(tmp_dir, "audio.wav")
-
     log("  Extraction de l'audio (FFmpeg)...")
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vn",                # pas de vidéo
-        "-ac", "1",            # mono
-        "-ar", "16000",        # 16kHz, format attendu par Whisper
-        "-acodec", "pcm_s16le",
-        tmp_wav,
-    ]
-    result = subprocess.run(cmd, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), text=True)
-
-    if result.returncode != 0 or not os.path.exists(tmp_wav):
-        log("  ERREUR lors de l'extraction audio :")
-        log(f"  {result.stderr[-800:]}")
-        raise RuntimeError("Échec de l'extraction audio, voir le journal ci-dessus.")
-
-    size_mb = os.path.getsize(tmp_wav) / (1024 * 1024)
-    log(f"  Audio extrait avec succès ({size_mb:.1f} Mo).")
+    try:
+        result = _executer(["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+                            "-acodec", "pcm_s16le", tmp_wav])
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg est introuvable. Réinstalle Studio Clips avec Studio-Clips.exe.") from None
+    if result.returncode != 0 or not os.path.exists(tmp_wav) or os.path.getsize(tmp_wav) < 1000:
+        print("Extraction audio impossible :", result.stderr[-1500:], flush=True)
+        if a_du_son(video_path) is False:
+            raise RuntimeError("Cette vidéo n'a pas de son : je ne peux pas trouver de passages parlés dedans.")
+        raise RuntimeError("Je n'arrive pas à lire le son de cette vidéo. Le fichier est peut-être abîmé : "
+                           "essaie de le réexporter depuis l'appli d'origine.")
+    log(f"  Audio extrait ({os.path.getsize(tmp_wav) / 1048576:.1f} Mo).")
     return tmp_wav
 
 
 def transcribe_video(video_path: str, model_size: str = "small", log=print):
     """
-    Transcrit la vidéo et retourne une liste de segments avec leurs
-    horodatages de début/fin (et ceux de chaque mot), ainsi que le texte complet.
+    Transcrit la vidéo.
 
-    Retourne:
-        segments: liste de dicts {start, end, text, words: [{start, end, text}]}
-        full_text_with_timestamps: string formatée pour l'IA
+    Retourne (segments, texte_horodate, langue) :
+        segments : liste de dicts {start, end, text, words: [{start, end, text}]}
+        langue   : code de la langue détectée (« fr », « en »…)
+    `log` peut lever une exception pour interrompre la transcription (bouton Arrêter).
     """
-    tmp_dir = tempfile.mkdtemp(prefix="tiktok_app_")
+    from faster_whisper import WhisperModel   # import lourd : seulement quand on transcrit
+
+    tmp_dir = tempfile.mkdtemp(prefix="studio_audio_")
     try:
         audio_path = _extract_audio(video_path, tmp_dir, log)
 
-        log(f"  Chargement du modèle Whisper '{model_size}'...")
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        log(f"  Chargement du modèle de transcription « {model_size} »...")
+        try:
+            model = WhisperModel(model_size, device="cpu", compute_type="int8", download_root=dossier_modeles())
+        except Exception as e:  # noqa: BLE001 — modèle absent et pas d'internet, disque plein…
+            print("Chargement Whisper impossible :", repr(e), flush=True)
+            raise RuntimeError("Le module de transcription n'est pas prêt. Il faut internet une fois pour le "
+                               "télécharger : vérifie ta connexion puis clique sur Relancer.") from None
 
         log("  Transcription en cours (ça peut prendre plusieurs minutes)...")
         # PC modeste (modèle léger) : recherche simple, ~2x plus rapide.
         beam = 5 if model_size in ("small", "medium", "large-v3") else 1
         segments_raw, info = model.transcribe(
-            audio_path, beam_size=beam, word_timestamps=True, vad_filter=True
+            audio_path, beam_size=beam, word_timestamps=True, vad_filter=True,
+            # sans ça, Whisper peut répéter la même phrase en boucle sur de la musique
+            condition_on_previous_text=False,
         )
 
-        segments = []
-        full_text_lines = []
+        segments, lignes = [], []
         duree = info.duration or 0
         palier = 0
-
-        # segments_raw est un générateur : la transcription se fait pendant
-        # cette boucle, donc AVANT de supprimer le fichier audio.
-        for seg in segments_raw:
+        for seg in segments_raw:   # générateur : la transcription se fait pendant cette boucle
             if duree:
                 pct = int(min(seg.end / duree, 1) * 100)
                 if pct >= palier + 5:
                     palier = pct - pct % 5
                     log(f"  ... {palier} % transcrit ({seg.end / 60:.0f} min sur {duree / 60:.0f})")
-            start = round(seg.start, 2)
-            end = round(seg.end, 2)
             text = seg.text.strip()
-            if not text:
+            if not text or getattr(seg, "no_speech_prob", 0) > 0.6 or HALLUCINATIONS.search(text):
                 continue
-            words = [
-                {"start": round(w.start, 2), "end": round(w.end, 2), "text": w.word.strip()}
-                for w in (seg.words or [])
-                if w.word.strip()
-            ]
+            start, end = round(seg.start, 2), round(seg.end, 2)
+            words = [{"start": round(w.start, 2), "end": round(w.end, 2), "text": w.word.strip()}
+                     for w in (seg.words or []) if w.word.strip()]
+            if segments and segments[-1]["text"] == text and start - segments[-1]["end"] < 2:
+                continue   # même phrase répétée à la suite = hallucination
             segments.append({"start": start, "end": end, "text": text, "words": words})
-            full_text_lines.append(f"[{start:.2f}s -> {end:.2f}s] {text}")
+            lignes.append(f"[{start:.2f}s -> {end:.2f}s] {text}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    full_text_with_timestamps = "\n".join(full_text_lines)
-
-    total_duration = segments[-1]["end"] if segments else 0
-    log(f"  Langue détectée : {info.language} | Durée parlée détectée : {total_duration:.0f}s")
-
-    if total_duration < 70:
-        log(
-            f"  ATTENTION : seulement ~{total_duration:.0f}s de contenu parlé détecté. "
-            "Si ta vidéo est plus longue que ça, il peut rester un souci sur le fichier "
-            "source lui-même (essaie de le ré-exporter depuis l'app d'origine)."
-        )
-
-    return segments, full_text_with_timestamps
+    parle = segments[-1]["end"] - segments[0]["start"] if segments else 0
+    log(f"  Langue détectée : {info.language} | parole détectée sur ~{parle:.0f}s")
+    return segments, "\n".join(lignes), info.language or "fr"

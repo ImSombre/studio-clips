@@ -128,8 +128,12 @@ def ligne_titre(texte, titre, numero, duree):
             f"{{\\an8\\pos(540,{y})}}" + "\\N".join(morceaux))
 
 
-def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None):
+LANGUES_SANS_ESPACES = ("zh", "ja", "ko", "th", "yue", "lo", "my")
+
+
+def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue="fr"):
     s = {**STYLE_DEFAUT, **(style or {})}
+    sep = "" if langue in LANGUES_SANS_ESPACES else " "
     y = int(HAUTEUR * max(5, min(95, float(s["position"]))) / 100)
     blanc = _couleur_ass(s["couleur"])
     entete = (
@@ -158,7 +162,7 @@ def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None):
         textes = [mot(w["texte"]) for w in g["mots"]]
         if not s.get("surligne"):
             lignes.append(f"Dialogue: 0,{_temps_ass(g['debut'])},{_temps_ass(g['fin'])},Default,,0,0,0,,"
-                          f"{pos}{' '.join(textes)}")
+                          f"{pos}{sep.join(textes)}")
             continue
         # Karaoké : un évènement par mot, le mot en cours prend la couleur de surlignage.
         jaune = _couleur_ass(s["surligne"])
@@ -170,7 +174,7 @@ def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None):
             morceaux = [
                 f"{{\\c{jaune}}}{t}{{\\c{blanc}}}" if i == k else t for i, t in enumerate(textes)
             ]
-            lignes.append(f"Dialogue: 0,{_temps_ass(a)},{_temps_ass(b)},Default,,0,0,0,,{pos}{' '.join(morceaux)}")
+            lignes.append(f"Dialogue: 0,{_temps_ass(a)},{_temps_ass(b)},Default,,0,0,0,,{pos}{sep.join(morceaux)}")
     with open(chemin, "w", encoding="utf-8") as f:
         f.write("\n".join(lignes) + "\n")
 
@@ -213,7 +217,10 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None):
     try:
         texte = {**TEXTE_DEFAUT, **(clip.get("texte") or {})}
         titre_ass = ligne_titre(texte, clip.get("titre"), clip.get("numero"), duree)
-        ecrire_ass(groupes, style, os.path.join(dossier_tmp, "subs.ass"), titre_ass, texte["taille"])
+        ecrire_ass(groupes, style, os.path.join(dossier_tmp, "subs.ass"), titre_ass, texte["taille"],
+                   clip.get("langue", "fr"))
+        # On encode dans un fichier provisoire : un export raté ne laisse jamais de MP4 coupé.
+        provisoire = os.path.splitext(os.path.abspath(sortie))[0] + ".encodage.mp4"
         # FFmpeg tourne DEPUIS le dossier temporaire : le nom du .ass est donné seul,
         # donc aucun souci d'échappement (apostrophes, « : », espaces dans les chemins).
         filtre = "[0:v]" + _filtre_video(clip.get("cadrage")) + ";[v0]ass=subs.ass[vout]"
@@ -222,7 +229,7 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None):
             "-filter_complex", filtre, "-map", "[vout]", "-map", "0:a:0?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-            "-progress", "pipe:1", "-nostats", os.path.abspath(sortie),
+            "-progress", "pipe:1", "-nostats", provisoire,
         ]
         journal = os.path.join(dossier_tmp, "ffmpeg.log")
         with open(journal, "w", encoding="utf-8", errors="replace") as err:
@@ -243,8 +250,14 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None):
             proc.wait()
         if proc.returncode != 0:
             with open(journal, encoding="utf-8", errors="replace") as f:
-                detail = f.read()[-800:]
-            raise RuntimeError(f"FFmpeg a échoué : {detail}")
+                print("Export FFmpeg échoué :", f.read()[-2000:], flush=True)
+            try:
+                os.remove(provisoire)
+            except OSError:
+                pass
+            raise RuntimeError("L'export n'a pas marché. Vérifie qu'il reste de la place sur le disque "
+                               "et que la vidéo d'origine est toujours là, puis réessaie.")
+        os.replace(provisoire, os.path.abspath(sortie))
         progression(100)
     finally:
         shutil.rmtree(dossier_tmp, ignore_errors=True)
@@ -255,7 +268,7 @@ def dimensions(video):
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
            "-of", "csv=p=0:s=x", video]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         l, h = r.stdout.strip().split("x")[:2]
         return int(l), int(h)

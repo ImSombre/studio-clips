@@ -2,6 +2,7 @@
 # Installation automatique de Studio Clips.
 # Lancé par INSTALLER.bat — installe tout, choisit les modèles selon la puissance du PC.
 $ErrorActionPreference = 'Stop'
+trap { Stop-Erreur $_.Exception.Message }
 $ProgressPreference = 'SilentlyContinue'
 $App = $PSScriptRoot
 Set-Location -LiteralPath $App
@@ -46,6 +47,8 @@ function Trouver-Python {
     $c = @("$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
            "$env:ProgramFiles\Python312\python.exe")
     foreach ($p in $c) { if (Test-Path -LiteralPath $p) { return $p } }
+    # Python 3.12 installé ailleurs : le lanceur « py » sait où il est
+    try { $p = (& py -3.12 -c "import sys; print(sys.executable)" 2>$null); if ($p -and (Test-Path -LiteralPath $p)) { return $p } } catch {}
     return $null
 }
 $py = Trouver-Python
@@ -78,6 +81,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $bin 'ffmpeg.exe'))) {
         $dir = if ($src) { $src.DirectoryName } else { $null }
     } else { $dir = Split-Path $src.Source }
     if (-not $dir) { Stop-Erreur "FFmpeg ne s'est pas installe." }
+    if (-not (Test-Path -LiteralPath (Join-Path $dir 'ffprobe.exe'))) { Stop-Erreur "FFmpeg est incomplet (ffprobe manquant)." }
     Copy-Item -LiteralPath (Join-Path $dir 'ffmpeg.exe'), (Join-Path $dir 'ffprobe.exe') -Destination $bin -Force
 }
 Ok "ffmpeg + ffprobe dans bin\"
@@ -115,7 +119,7 @@ $t = $t -replace 'model_size: str = "[a-z0-9.-]+"', "model_size: str = `"$whispe
 [IO.File]::WriteAllText($f, $t, $utf8)
 
 Write-Host "    Telechargement du modele de transcription '$whisper'..."
-& $venvPy -c "from faster_whisper import WhisperModel; WhisperModel('$whisper', device='cpu', compute_type='int8')"
+& $venvPy -c "import sys; sys.path.insert(0, r'$App'); from transcribe import dossier_modeles; from faster_whisper import WhisperModel; WhisperModel('$whisper', device='cpu', compute_type='int8', download_root=dossier_modeles())"
 if ($LASTEXITCODE -ne 0) { Stop-Erreur "Le telechargement du modele de transcription a echoue." }
 Ok "modeles prets"
 

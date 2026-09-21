@@ -83,7 +83,11 @@
           </ol>
           <p class="traitement-note">Laisse la fenêtre ouverte. Sur un petit PC, une longue vidéo peut prendre un moment : la barre avance, c'est que ça travaille.</p>
           <div id="traitement-erreur" class="erreur" hidden></div>
-          <button id="btn-relancer" class="bouton-contour" type="button" hidden>Relancer</button>
+          <div class="traitement-actions">
+            <button id="btn-relancer" class="bouton-contour" type="button" hidden>Relancer</button>
+            <button id="btn-retrouver-t" class="bouton-contour" type="button" data-retrouver hidden>Retrouver la vidéo</button>
+            <button id="btn-arreter" class="bouton-fantome" type="button" hidden>Arrêter</button>
+          </div>
         </div>
       </div>
 
@@ -165,7 +169,7 @@
               </div>
               <div class="ligne" id="ligne-tpos">
                 <label>Hauteur</label>
-                <input type="range" id="r-tpos" min="3" max="40" step="1"><span class="val mono" id="v-tpos"></span>
+                <input type="range" id="r-tpos" min="3" max="60" step="1"><span class="val mono" id="v-tpos"></span>
               </div>
             </div>
 
@@ -247,6 +251,13 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="ia-etat" class="ia-etat" hidden></div>
+<div id="hors-ligne" class="hors-ligne" hidden>
+  <div class="hors-ligne-carte">
+    <div class="traitement-rec"><span class="rec"></span> STUDIO CLIPS</div>
+    <h2>Studio Clips s'est arrêté</h2>
+    <p>Ferme cette fenêtre, puis rouvre Studio Clips avec le raccourci du Bureau. Tes projets sont sauvegardés.</p>
+  </div>
+</div>
 <button id="maj-dispo" class="maj-dispo" type="button" hidden></button>
 <script src="/static/studio.js"></script>
 </body>

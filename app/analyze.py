@@ -57,6 +57,8 @@ ces règles strictes :
 - Utilise UNIQUEMENT les timestamps réels présents dans le texte fourni,
   en secondes, sous forme de NOMBRES (ex : 12.5, pas "12.5s" ni "00:12").
 - Donne à chaque extrait une note "score" de 1 à 10 (10 = potentiel viral énorme).
+- Écris "title" et "reason" dans la MÊME LANGUE que la transcription, et adapte le ton du titre
+  au type de contenu (humour, podcast, gaming, tuto, info, sport, histoire vraie…).
 - Propose entre 0 et 3 extraits pour cette portion (n'invente rien, ne force rien).
 
 Réponds UNIQUEMENT avec un JSON valide, aucun texte avant ou après, dans ce format exact :
@@ -74,6 +76,11 @@ Réponds UNIQUEMENT avec un JSON valide, aucun texte avant ou après, dans ce fo
 """
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+# Même taille de contexte pour TOUS les appels (analyse, chat, titres) : sinon Ollama
+# recharge le modèle à chaque changement, ce qui prend des dizaines de secondes sur un petit PC.
+NUM_CTX = 8192
+# Un morceau de transcription ne doit pas dépasser la fenêtre de contexte (≈ 3 caractères / jeton).
+CHARS_PAR_MORCEAU = 12000
 OLLAMA_MODEL = "llama3.1"
 
 # Nombre de lignes de transcription (environ une par phrase/segment de parole)
@@ -100,34 +107,30 @@ def _call_ollama(user_message: str, model: str, log, system_prompt: str) -> list
                 "stream": False,
                 # Qwen3 : pas de « réflexion » à voix haute, réponse directe
                 **({"think": False} if str(model).startswith("qwen3") else {}),
-                "options": {"temperature": 0.3, "num_ctx": 8192},
+                "options": {"temperature": 0.3, "num_ctx": NUM_CTX},
             },
-            timeout=1800,
+            timeout=600,
         )
     except requests.exceptions.ConnectionError:
-        raise RuntimeError(
-            "Impossible de contacter Ollama. Vérifie qu'Ollama est bien installé et lancé "
-            "(l'icône doit être visible en bas à droite), et que le modèle a été téléchargé "
-            f"avec 'ollama pull {model}'."
-        )
+        raise RuntimeError("L'IA ne répond pas (elle est peut-être en train de démarrer). "
+                           "Attends une minute puis clique sur Relancer.") from None
     except requests.exceptions.Timeout:
-        log("    (l'IA a mis plus de 30 minutes à répondre pour ce morceau, on l'ignore et on continue)")
-        return []
+        log("    (l'IA a mis plus de 10 minutes à répondre pour ce morceau, on l'ignore et on continue)")
+        return None
 
     if response.status_code == 404:
-        raise RuntimeError(
-            f"Le modèle '{model}' n'est pas installé dans Ollama. "
-            f"Ouvre un terminal et tape : ollama pull {model}"
-        )
+        raise RuntimeError("L'IA n'est pas encore téléchargée. Attends la fin du téléchargement "
+                           "(barre en bas à gauche de l'appli), puis clique sur Relancer.")
     if not response.ok:
         log(f"    (Ollama a renvoyé une erreur {response.status_code} pour ce morceau, on l'ignore)")
-        return []
+        print("Ollama erreur", response.status_code, response.text[:300], flush=True)
+        return None
 
     try:
         raw_text = response.json()["message"]["content"].strip()
     except (ValueError, KeyError, TypeError):
         log("    (réponse d'Ollama illisible pour ce morceau, on l'ignore et on continue)")
-        return []
+        return None
 
     raw_text_clean = re.sub(r"^```json\s*|\s*```$", "", raw_text)
     match = re.search(r"\{.*\}", raw_text_clean, re.DOTALL)
@@ -138,10 +141,10 @@ def _call_ollama(user_message: str, model: str, log, system_prompt: str) -> list
         data = json.loads(raw_text_clean)
     except json.JSONDecodeError:
         log("    (réponse non exploitable de l'IA pour ce morceau, on l'ignore et on continue)")
-        return []
+        return None
 
     if not isinstance(data, dict):
-        return []
+        return None
     clips = data.get("clips", [])
     return clips if isinstance(clips, list) else []
 
@@ -198,8 +201,11 @@ def _normalize_clip(clip, video_duration, log, clip_min=CLIP_MIN, clip_max=CLIP_
     if video_duration:
         end = min(end, video_duration)
         if end - start < clip_min * 0.5:
-            log(f"  Extrait ignoré (trop près de la fin de la vidéo) : {title}")
-            return None
+            # passage proposé tout à la fin : on avance son début au lieu de le jeter
+            start = max(0.0, end - (clip_min + clip_max) / 2)
+            if end - start < min(clip_min * 0.5, 5):
+                log(f"  Extrait ignoré (vidéo trop courte à cet endroit) : {title}")
+                return None
 
     try:
         score = float(clip.get("score", 5))
@@ -219,14 +225,18 @@ def _overlaps_too_much(a, b) -> bool:
 
 
 def _split_in_chunks(lines):
-    step = LINES_PER_CHUNK - CHUNK_OVERLAP
-    chunks = []
-    i = 0
-    while True:
-        chunks.append(lines[i:i + LINES_PER_CHUNK])
-        if i + LINES_PER_CHUNK >= len(lines):
-            return chunks
-        i += step
+    """Morceaux qui se chevauchent, limités en lignes ET en caractères."""
+    chunks, i = [], 0
+    while i < len(lines):
+        taille, j = 0, i
+        while j < len(lines) and j - i < LINES_PER_CHUNK and (taille + len(lines[j]) < CHARS_PAR_MORCEAU or j == i):
+            taille += len(lines[j]) + 1
+            j += 1
+        chunks.append(lines[i:j])
+        if j >= len(lines):
+            break
+        i = max(i + 1, j - min(CHUNK_OVERLAP, (j - i) // 4))
+    return chunks
 
 
 def find_best_clips(
@@ -258,8 +268,12 @@ def find_best_clips(
     chunks = _split_in_chunks(lines)
     log(f"  Vidéo découpée en {len(chunks)} partie(s) pour l'analyse par l'IA locale.")
 
+    # Vidéo plus courte que la durée demandée : on vise ce qu'elle permet.
+    if video_duration and video_duration < clip_min + 5:
+        clip_min, clip_max = max(5, video_duration * 0.5), video_duration
     system_prompt = _system_prompt(int(clip_min), int(clip_max))
     all_clips = []
+    echecs = 0
     for idx, chunk_lines in enumerate(chunks, start=1):
         chunk_text = "\n".join(chunk_lines)
         user_message = f"Voici une portion de la transcription horodatée :\n\n{chunk_text}"
@@ -271,10 +285,16 @@ def find_best_clips(
 
         log(f"  Analyse de la partie {idx}/{len(chunks)}...")
         clips = _call_ollama(user_message, model, log, system_prompt)
+        if clips is None:
+            echecs += 1
+            continue
         if clips:
             log(f"    -> {len(clips)} extrait(s) trouvé(s) dans cette partie.")
         all_clips.extend(clips)
 
+    if echecs and echecs == len(chunks):
+        raise RuntimeError("L'IA n'a pas réussi à analyser la vidéo (elle manque peut-être de mémoire). "
+                           "Ferme les autres logiciels ouverts puis clique sur Relancer.")
     log(f"  Total avant filtrage : {len(all_clips)} extrait(s) sur l'ensemble de la vidéo.")
 
     valid_clips = [

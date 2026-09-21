@@ -74,18 +74,38 @@ def _choisir_parmi(presents):
     return None
 
 
+def _demarrer_ollama():
+    """Relance le moteur d'IA s'il ne tourne pas (installé pour l'utilisateur ou pour tout le PC)."""
+    import os
+    import shutil
+    import subprocess
+    for exe in (os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe"),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Ollama", "ollama.exe"),
+                shutil.which("ollama") or ""):
+        if exe and os.path.exists(exe):
+            subprocess.Popen([exe, "serve"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                             close_fds=True)
+            return True
+    return False
+
+
 def preparer():
-    """À lancer au démarrage, dans un thread : télécharge le modèle voulu s'il manque."""
+    """À lancer au démarrage, dans un thread : télécharge le modèle voulu s'il manque.
+    Si Ollama ne répond pas, on le relance et on réessaie en arrière-plan, sans jamais abandonner."""
     etat["voulu"] = modele_voulu()
-    for _ in range(30):  # Ollama peut mettre quelques secondes à démarrer
+    essai = 0
+    while True:
         try:
             presents = installes()
             break
-        except Exception:  # noqa: BLE001
-            threading.Event().wait(2)
-    else:
-        etat.update(etat="erreur", message="L'IA (Ollama) ne répond pas. Relance l'appli.")
-        return
+        except Exception:  # noqa: BLE001 — Ollama pas (encore) démarré
+            essai += 1
+            if essai == 5:
+                _demarrer_ollama()
+            if essai >= 30:
+                etat.update(etat="erreur", message="L'IA démarre… (si ce message reste, redémarre le PC)")
+            threading.Event().wait(2 if essai < 30 else 15)
+    etat["message"] = ""
     etat["modele"] = _choisir_parmi(presents)
     if etat["voulu"] in presents:
         etat.update(etat="pret", pct=100)
@@ -113,9 +133,9 @@ def attendre_pret(pendant=None):
     """Bloque tant que le téléchargement tourne (appelé par l'analyse d'une vidéo).
     La simple vérification ne peut pas bloquer plus de 2 minutes : on utilise alors ce qui est installé."""
     attente_verif = 0
-    while etat["etat"] == "telechargement" or (etat["etat"] == "verification" and attente_verif < 120):
+    while etat["etat"] == "telechargement" or (etat["etat"] in ("verification", "erreur") and attente_verif < 180):
         if pendant:
             pendant(etat)
-        if etat["etat"] == "verification":
-            attente_verif += 1
+        if etat["etat"] != "telechargement":
+            attente_verif += 1   # Ollama démarre : on lui laisse 3 minutes avant d'essayer quand même
         threading.Event().wait(1)

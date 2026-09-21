@@ -17,7 +17,7 @@ import unicodedata
 import requests
 
 import modele_ia
-from analyze import OLLAMA_URL
+from analyze import OLLAMA_URL, NUM_CTX
 from montage import STYLE_DEFAUT, CADRAGE_DEFAUT, TEXTE_DEFAUT, POLICES, mots_du_passage
 
 CE_QUE_JE_SAIS_FAIRE = (
@@ -402,6 +402,7 @@ def _promesse_vide(reponse, clip):
 
 
 def _resoudre_relatifs(clip, actions):
+    actions = [a for a in (actions if isinstance(actions, list) else []) if isinstance(a, dict)]
     for a in actions:
         if a.get("type") == "sous_titres" and "taille_rel" in a:
             base = clip.get("style", {}).get("taille", STYLE_DEFAUT["taille"])
@@ -485,7 +486,7 @@ def demander_ia(projet, clip, message, historique):
         r = requests.post(OLLAMA_URL, json={
             "model": modele, "messages": messages, "format": "json", "stream": False,
             **({"think": False} if modele.startswith("qwen3") else {}),
-            "options": {"temperature": 0.3, "num_ctx": 6144},
+            "options": {"temperature": 0.3, "num_ctx": NUM_CTX},
         }, timeout=300)
     except requests.exceptions.ConnectionError:
         return "Je n'arrive pas à joindre l'IA (Ollama). Relance l'appli, ça la redémarre.", []
@@ -497,6 +498,8 @@ def demander_ia(projet, clip, message, historique):
         brut = r.json()["message"]["content"]
         m = re.search(r"\{.*\}", brut, re.S)
         data = json.loads(m.group(0) if m else brut)
+        if not isinstance(data, dict):
+            raise ValueError("réponse qui n'est pas un objet")
     except (ValueError, KeyError, TypeError, AttributeError):
         return "Je n'ai pas bien compris, tu peux reformuler ?", []
     reponse = str(data.get("reponse") or data.get("réponse") or "").strip() or "C'est noté."
@@ -507,13 +510,19 @@ def demander_ia(projet, clip, message, historique):
 # ----------------------------------------------------------------------
 # Titres tirés du contenu du clip
 # ----------------------------------------------------------------------
-CONSIGNE_TITRES = """Tu écris des titres de vidéos TikTok en français.
-On te donne ce qui est dit dans UN clip. Propose {n} titres différents :
+CONSIGNE_TITRES = """Tu écris des titres de vidéos TikTok.
+On te donne ce qui est dit dans UN clip de {duree} secondes. Propose {n} titres différents :
+- écrits en {langue} (la langue parlée dans le clip) ;
+- adaptés au TYPE de contenu que tu devines (humour, podcast / discussion, gaming, tuto, info, sport,
+  histoire vraie, débat…) : drôle pour de l'humour, intrigant pour une révélation, clair pour un tuto ;
 - courts (6 mots maximum, 45 caractères maximum), accrocheurs, qui donnent envie de regarder ;
-- fidèles à ce qui est VRAIMENT dit dans le clip (n'invente rien) ;
+- fidèles à ce qui est VRAIMENT dit dans le clip (n'invente rien, pas de nom qui n'y est pas) ;
 - styles variés : une question, une affirmation choc, un « POV » ou « Quand… » ;
 - pas de hashtag, pas de guillemets, au plus un emoji.
 Réponds UNIQUEMENT avec ce JSON : {{"titres": ["titre 1", "titre 2"]}}"""
+NOMS_LANGUES = {"fr": "français", "en": "anglais", "es": "espagnol", "ar": "arabe", "de": "allemand",
+                "it": "italien", "pt": "portugais", "nl": "néerlandais", "tr": "turc", "ru": "russe",
+                "pl": "polonais", "ro": "roumain", "ja": "japonais", "zh": "chinois", "ko": "coréen"}
 
 
 def _titre_secours(texte_clip):
@@ -536,9 +545,11 @@ def proposer_titres(projet, clip, n=3):
         r = requests.post(OLLAMA_URL, json={
             "model": modele, "format": "json", "stream": False,
             **({"think": False} if modele.startswith("qwen3") else {}),
-            "messages": [{"role": "system", "content": CONSIGNE_TITRES.format(n=n)},
+            "messages": [{"role": "system", "content": CONSIGNE_TITRES.format(
+                n=n, duree=round(clip["fin"] - clip["debut"]),
+                langue=NOMS_LANGUES.get(projet.get("langue", "fr"), projet.get("langue", "fr")))},
                          {"role": "user", "content": f"Ce qui est dit dans le clip :\n{texte_clip[:3000]}"}],
-            "options": {"temperature": 0.8, "num_ctx": 4096},
+            "options": {"temperature": 0.8, "num_ctx": NUM_CTX},
         }, timeout=180)
         r.raise_for_status()
         brut = r.json()["message"]["content"]

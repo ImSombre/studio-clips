@@ -1,9 +1,15 @@
-# Installation complète de Studio Clips (lancée par Studio-Clips.exe).
+﻿# Installation complète de Studio Clips (lancée par Studio-Clips.exe).
 # Installe dans %LOCALAPPDATA%\StudioClips, récupère les projets d'une ancienne installation,
 # puis ouvre l'appli. Rien à décompresser, rien à choisir.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $ici = $PSScriptRoot
+# Toute erreur imprévue : on l'affiche et on attend, au lieu de fermer la fenêtre sans rien dire.
+trap {
+    Write-Host ""; Write-Host "PROBLEME : $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Fais une capture de cette fenetre et envoie-la." -ForegroundColor Yellow
+    Read-Host "Appuie sur Entree pour fermer"; exit 1
+}
 $dest = Join-Path $env:LOCALAPPDATA 'StudioClips'
 
 Write-Host "=============================================" -ForegroundColor Magenta
@@ -20,9 +26,11 @@ if (Test-Path -LiteralPath $lnk) {
 }
 
 # L'appli ne doit pas tourner pendant qu'on remplace ses fichiers
-Get-Process -Name pythonw, python -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and ($_.Path -like "$dest*" -or ($ancien -and $_.Path -like "$ancien*")) } |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+# (un venv lance le vrai Python ailleurs : on reconnaît l'appli à sa ligne de commande)
+Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -like "*$dest*" -or ($ancien -and $_.CommandLine -like "*$ancien*")) } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 800
 
 Write-Host ""; Write-Host "==> Copie de l'application" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
