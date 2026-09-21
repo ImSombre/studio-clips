@@ -1,0 +1,8 @@
+﻿STUDIO CLIPS - transforme une longue video en clips TikTok
+
+Installation : double-clique sur Studio-Clips.exe, c est tout.
+  (Si Windows affiche "Windows a protege votre ordinateur" : "Informations complementaires" puis "Executer quand meme".)
+  L appli s ouvre toute seule a la fin, et un raccourci "Studio Clips" est cree sur le Bureau.
+
+Mises a jour : automatiques. A chaque ouverture, Studio Clips installe tout seul la derniere version.
+Le numero de version est affiche en haut de la fenetre.

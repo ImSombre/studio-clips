@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Clips</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/studio.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23171514'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23ff4d2e'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- ============ ACCUEIL ============ -->
+<main id="accueil" class="ecran-app">
+  <section class="accueil-gauche">
+    <div class="marque"><span class="rec"></span> STUDIO&nbsp;CLIPS <b class="version" data-version></b></div>
+    <h1 class="titre-geant">Une vidéo longue entre.<br><em>Des clips</em> sortent.</h1>
+    <p class="sous-titre">Transcription, choix des meilleurs passages, sous-titres karaoké, montage au chat. Tout tourne sur ton PC.</p>
+
+    <div class="carte-nouveau">
+      <button id="btn-choisir" class="zone-video" type="button">
+        <span class="zone-icone" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="26" height="26"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h7A2.5 2.5 0 0 1 16 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 4 17.5v-11Zm12 3.2 4-2.4v9.4l-4-2.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="zone-texte">
+          <strong id="nom-video">Choisir une vidéo</strong>
+          <small id="chemin-video">MP4, MOV, MKV, AVI…</small>
+        </span>
+      </button>
+
+      <label class="etiquette" for="consigne">Ce que tu veux <span>(facultatif)</span></label>
+      <textarea id="consigne" rows="2" placeholder="Ex : les moments drôles, clips de 1 min à 1 min 05, évite l'intro…"></textarea>
+      <div class="puces" id="puces-accueil">
+        <button type="button" data-texte="les moments les plus drôles">😂 Moments drôles</button>
+        <button type="button" data-texte="clips de 1 min à 1 min 05">⏱ Clips de 1 min</button>
+        <button type="button" data-texte="évite les 5 premières minutes">⏭ Évite l'intro</button>
+        <button type="button" data-texte="les révélations et les phrases chocs">⚡ Punchlines</button>
+      </div>
+
+      <button id="btn-lancer" class="bouton-rec" type="button" disabled>
+        <span class="rec"></span> Lancer
+      </button>
+    </div>
+  </section>
+
+  <section class="accueil-droite">
+    <header class="entete-liste"><h2>Tes projets</h2><span id="nb-projets" class="mono"></span></header>
+    <div id="liste-projets" class="liste-projets"></div>
+  </section>
+</main>
+
+<!-- ============ STUDIO ============ -->
+<main id="studio" class="ecran-app" hidden>
+  <header class="barre">
+    <button id="btn-retour" class="bouton-fantome" type="button">← Projets</button>
+    <div class="barre-titre"><span class="rec petit"></span><span id="titre-projet"></span><b class="version" data-version></b></div>
+    <div id="jobs-barre" class="jobs-barre"></div>
+    <button id="btn-dossier" class="bouton-fantome" type="button">Ouvrir le dossier</button>
+    <button id="btn-tout" class="bouton-contour" type="button">Exporter tout</button>
+  </header>
+
+  <div class="plateau">
+    <!-- Clips -->
+    <aside class="col-clips">
+      <div class="col-entete"><h3>Clips</h3><span id="nb-clips" class="mono"></span></div>
+      <div id="liste-clips" class="liste-clips"></div>
+    </aside>
+
+    <!-- Lecteur + réglages -->
+    <section class="col-centre">
+      <div id="traitement" class="traitement" hidden>
+        <div class="traitement-carte">
+          <div class="traitement-rec"><span class="rec"></span> TRAITEMENT</div>
+          <h2 id="traitement-etape">Démarrage…</h2>
+          <div class="barre-progression"><i id="traitement-barre"></i></div>
+          <div class="traitement-pct mono"><span id="traitement-pct">0 %</span><span id="traitement-msg"></span></div>
+          <ol class="etapes" id="traitement-etapes">
+            <li data-e="1">Transcription de la vidéo</li>
+            <li data-e="2">L'IA choisit les meilleurs passages</li>
+            <li data-e="3">Tes clips sont prêts</li>
+          </ol>
+          <p class="traitement-note">Laisse la fenêtre ouverte. Sur un petit PC, une longue vidéo peut prendre un moment : la barre avance, c'est que ça travaille.</p>
+          <div id="traitement-erreur" class="erreur" hidden></div>
+          <button id="btn-relancer" class="bouton-contour" type="button" hidden>Relancer</button>
+        </div>
+      </div>
+
+      <div id="vide" class="vide" hidden>
+        <p>Aucun clip pour l'instant.</p>
+        <p class="doux">Demande à l'IA dans le chat : « trouve-moi un passage drôle ».</p>
+      </div>
+
+      <div id="montage" class="montage" hidden>
+        <div class="scene">
+          <div class="telephone">
+            <div class="ecran-video" id="ecran-video">
+              <canvas id="fond" width="72" height="128"></canvas>
+              <video id="lecteur" preload="auto" playsinline></video>
+              <div id="titre-ecran" class="titre-ecran"></div>
+              <div id="soustitre" class="soustitre"></div>
+              <div id="apercu-msg" class="apercu-msg" hidden></div>
+              <button id="btn-grand-play" class="grand-play" type="button" aria-label="Lecture"></button>
+            </div>
+          </div>
+
+          <div class="reglages">
+            <div class="reglages-tete">
+              <input id="titre-clip" class="titre-clip" maxlength="80" aria-label="Titre du clip"
+                     title="Clique pour renommer le clip" placeholder="Titre du clip">
+              <div class="note-clip mono" id="note-clip"></div>
+            </div>
+            <p id="raison-clip" class="raison"></p>
+
+            <div class="groupe">
+              <div class="groupe-titre">Sous-titres</div>
+              <div class="ligne">
+                <label>Police</label>
+                <select id="r-police"></select>
+              </div>
+              <div class="ligne">
+                <label>Taille</label>
+                <input type="range" id="r-taille" min="40" max="140" step="2"><span class="val mono" id="v-taille"></span>
+              </div>
+              <div class="ligne">
+                <label>Hauteur</label>
+                <input type="range" id="r-position" min="8" max="92" step="1"><span class="val mono" id="v-position"></span>
+              </div>
+              <div class="ligne">
+                <label>Couleur</label>
+                <div class="pastilles" id="r-couleur"></div>
+              </div>
+              <div class="ligne">
+                <label>Karaoké</label>
+                <div class="pastilles" id="r-surligne"></div>
+              </div>
+              <div class="ligne">
+                <label>Mots</label>
+                <div class="segmente" id="r-mots"></div>
+                <button type="button" class="bascule" id="r-maj" aria-pressed="true">AA</button>
+              </div>
+            </div>
+
+            <div class="groupe">
+              <div class="groupe-titre">Texte à l'écran</div>
+              <div class="ligne">
+                <label>Afficher</label>
+                <button type="button" class="bascule texte" id="r-titre" aria-pressed="false">Titre</button>
+                <button type="button" class="bascule texte" id="r-partie" aria-pressed="false">Partie N</button>
+              </div>
+              <div class="ligne" id="ligne-contenu">
+                <label>Texte</label>
+                <input class="champ" id="r-contenu" maxlength="120" placeholder="(le titre du clip)" aria-label="Texte affiché sur la vidéo">
+              </div>
+              <div class="ligne" id="ligne-num">
+                <label>N° partie</label>
+                <input class="champ court" id="r-num" type="number" min="1" max="99" placeholder="auto" aria-label="Numéro de partie">
+                <span class="doux petit-texte">vide = numéro du clip</span>
+              </div>
+              <div class="ligne" id="ligne-tpos">
+                <label>Hauteur</label>
+                <input type="range" id="r-tpos" min="3" max="40" step="1"><span class="val mono" id="v-tpos"></span>
+              </div>
+            </div>
+
+            <div class="groupe">
+              <div class="groupe-titre">Cadrage</div>
+              <div class="ligne">
+                <div class="segmente large" id="r-cadrage">
+                  <button type="button" data-v="remplir">Plein écran (TikTok)</button>
+                  <button type="button" data-v="flou">Vidéo entière + flou</button>
+                </div>
+              </div>
+              <div class="ligne" id="ligne-decalage">
+                <label>Recentrer</label>
+                <input type="range" id="r-decalage" min="-50" max="50" step="1"><span class="val mono" id="v-decalage"></span>
+              </div>
+            </div>
+
+            <button id="btn-tous" class="bouton-contour tous" type="button">Appliquer ce style à tous les clips</button>
+            <div class="actions-clip">
+              <button id="btn-annuler" class="bouton-fantome" type="button" title="Annuler (Ctrl+Z)">↶ Annuler</button>
+              <button id="btn-suppr" class="bouton-fantome danger" type="button">Supprimer</button>
+              <button id="btn-exporter" class="bouton-rec" type="button"><span class="rec"></span> Exporter le clip</button>
+            </div>
+            <div id="export-etat" class="export-etat"></div>
+          </div>
+        </div>
+
+        <div class="transport">
+          <button id="btn-play" class="rond" type="button" aria-label="Lecture / pause"></button>
+          <div class="temps mono"><span id="t-actuel">00:00.0</span><span class="doux"> / </span><span id="t-duree">00:00.0</span></div>
+          <div class="bornes mono">
+            <span class="borne">DÉBUT <b id="t-debut"></b>
+              <button type="button" data-borne="debut" data-d="-0.5">−</button><button type="button" data-borne="debut" data-d="0.5">+</button>
+              <button type="button" class="ici" data-ici="debut" title="Raccourci : I">ici</button></span>
+            <span class="borne">FIN <b id="t-fin"></b>
+              <button type="button" data-borne="fin" data-d="-0.5">−</button><button type="button" data-borne="fin" data-d="0.5">+</button>
+              <button type="button" class="ici" data-ici="fin" title="Raccourci : O">ici</button></span>
+          </div>
+          <label class="boucle"><input type="checkbox" id="boucle" checked> Boucle</label>
+        </div>
+        <div class="timeline" id="timeline">
+          <div class="tl-graduations" id="tl-graduations"></div>
+          <div class="tl-piste" id="tl-piste">
+            <div class="tl-mots" id="tl-mots"></div>
+            <div class="tl-zone" id="tl-zone">
+              <span class="poignee" data-p="debut"></span>
+              <span class="poignee" data-p="fin"></span>
+            </div>
+            <div class="tl-tete" id="tl-tete"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chat -->
+    <aside class="col-chat">
+      <div class="col-entete"><h3>Assistant</h3><span class="doux petit-texte" id="chat-contexte"></span></div>
+      <div id="fil" class="fil"></div>
+      <div class="puces puces-chat" id="puces-chat">
+        <button type="button">Mets tous les clips en plein écran</button>
+        <button type="button">Mets le titre et le numéro de partie sur tous les clips</button>
+        <button type="button">Qu'est-ce que tu sais faire ?</button>
+        <button type="button">Coupe les 2 premières secondes</button>
+        <button type="button">Sous-titres en jaune</button>
+        <button type="button">Plus gros</button>
+        <button type="button">Mets-le en plein écran</button>
+        <button type="button">Trouve-moi un passage drôle</button>
+        <button type="button">De quoi parle ce clip ?</button>
+      </div>
+      <form id="form-chat" class="saisie">
+        <textarea id="message" rows="1" placeholder="Dis-moi ce que tu veux changer…"></textarea>
+        <button type="submit" class="envoyer" aria-label="Envoyer">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </aside>
+  </div>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="ia-etat" class="ia-etat" hidden></div>
+<button id="maj-dispo" class="maj-dispo" type="button" hidden></button>
+<script src="/static/studio.js"></script>
+</body>
+</html>
