@@ -458,4 +458,17 @@ input[type=range] { flex: 1; accent-color: var(--rec); height: 20px; }
   box-shadow: 0 16px 40px -12px rgba(255, 77, 46, .7); animation: monte .5s var(--ease) both;
 }
 .maj-dispo .rec { background: #fff; box-shadow: none; }
-.maj-dispo u { text-underline-offset: 3px; }
+.maj-dispo u { text-underline-offset: 3px; }.titres-actions { display: flex; align-items: center; gap: 8px; margin-top: -4px; }
+.bouton-idee {
+  border: 1px solid var(--rec); background: var(--rec-voile); color: var(--texte); border-radius: 999px;
+  padding: 6px 14px; font: 600 13px var(--corps); transition: background .15s, transform .15s var(--ease);
+}
+.bouton-idee:hover { background: rgba(255, 77, 46, .25); transform: translateY(-1px); }
+.idees { display: flex; flex-direction: column; gap: 6px; }
+.idee {
+  text-align: left; background: var(--nuit); border: 1px solid var(--trait); border-radius: 10px; padding: 8px 12px;
+  font: 600 13px var(--corps); color: var(--texte); transition: border-color .15s, background .15s; animation: bulle .3s var(--ease) both;
+}
+.idee:hover { border-color: var(--rec); }
+.idee.choisie { border-color: var(--ok); background: var(--ok-voile); }
+.idee.autre { color: var(--doux); font-weight: 500; border-style: dashed; }

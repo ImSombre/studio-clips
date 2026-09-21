@@ -38,7 +38,7 @@ import montage  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration  # noqa: E402
 
-VERSION = "2.6"
+VERSION = "2.7"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 
@@ -270,6 +270,28 @@ def job_nouveau_clip(pid, consigne):
     return lancer_job(pid, "nouveau_clip", travail, etape="Recherche")
 
 
+def job_titrer_tous(pid):
+    """Un titre accrocheur pour chaque clip, tiré de ce qui y est dit."""
+    def travail(job):
+        p = charger(pid)
+        modele_ia.attendre_pret()
+        total = len(p["clips"])
+        for i, c in enumerate(list(p["clips"]), 1):
+            job["etape"] = f"Titre du clip {i}/{total}"
+            job["pct"] = int(100 * (i - 1) / max(total, 1))
+            titre = assistant.proposer_titres(p, c, n=3)[0]
+            with verrou:
+                assistant.memoriser(c)
+                c["titre"] = titre[:80]
+                c["exporte"] = None
+                sauver(p)
+        with verrou:
+            dire(p, f"C'est fait : {total} clip(s) ont un nouveau titre tiré de leur contenu. "
+                    "Tu peux en changer un avec ✨ Idées de titre, ou annuler clip par clip.")
+            sauver(p)
+    return lancer_job(pid, "titres", travail, etape="Titres")
+
+
 def job_export(pid, cid):
     def travail(job):
         job["etape"] = "En attente de l'export précédent"
@@ -481,6 +503,18 @@ def supprimer_clip(pid, cid):
     return jsonify({"ok": True})
 
 
+@app.post("/api/projets/<pid>/clips/<cid>/titres")
+def idees_titres(pid, cid):
+    p = charger(pid)
+    return jsonify({"titres": assistant.proposer_titres(p, clip_de(p, cid))})
+
+
+@app.post("/api/projets/<pid>/titrer-tous")
+def titrer_tous(pid):
+    charger(pid)
+    return jsonify(job_titrer_tous(pid))
+
+
 @app.post("/api/projets/<pid>/clips/<cid>/exporter")
 def exporter(pid, cid):
     clip_de(charger(pid), cid)
@@ -537,12 +571,20 @@ def chat(pid):
                     autre["exporte"] = None
         dire(p, reponse.strip() or "C'est noté.", cid)
         sauver(p)
+    propositions = None
     for s in speciales:
+        if s == "titrer_tous":
+            job_titrer_tous(pid)
+        elif isinstance(s, tuple) and s[0] == "titres":
+            propositions = s[1]
         if s == "exporter":
             job_export(pid, cid)
         elif isinstance(s, tuple) and s[0] == "nouveau_clip":
             job_nouveau_clip(pid, s[1] or message)
-    return jsonify(vue_projet(p, avec_segments=False))
+    reponse_json = vue_projet(p, avec_segments=False)
+    if propositions:
+        reponse_json["propositions"] = propositions
+    return jsonify(reponse_json)
 
 
 @app.post("/api/projets/<pid>/ouvrir")

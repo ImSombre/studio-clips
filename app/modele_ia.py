@@ -110,8 +110,12 @@ def preparer():
 
 
 def attendre_pret(pendant=None):
-    """Bloque tant que le téléchargement tourne (appelé par l'analyse d'une vidéo)."""
-    while etat["etat"] in ("verification", "telechargement"):
+    """Bloque tant que le téléchargement tourne (appelé par l'analyse d'une vidéo).
+    La simple vérification ne peut pas bloquer plus de 2 minutes : on utilise alors ce qui est installé."""
+    attente_verif = 0
+    while etat["etat"] == "telechargement" or (etat["etat"] == "verification" and attente_verif < 120):
         if pendant:
             pendant(etat)
+        if etat["etat"] == "verification":
+            attente_verif += 1
         threading.Event().wait(1)

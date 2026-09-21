@@ -230,7 +230,7 @@ function afficherClips(reconstruire) {
 $("#liste-clips").addEventListener("click", (e) => {
   const b = e.target.closest(".clip"); if (!b || b.dataset.id === cur) return;
   envoyerPatchMaintenant();
-  cur = b.dataset.id; libre = false;
+  cur = b.dataset.id; libre = false; $("#idees").hidden = true;
   afficherClips(false); afficherMontage(true); afficherChat();
   const v = $("#lecteur"); v.currentTime = clip().debut; v.play().catch(() => {});
 });
@@ -263,7 +263,7 @@ $("#btn-relancer").addEventListener("click", async () => {
 });
 
 function afficherJobs() {
-  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse" };
+  const libelles = { export: "Export", nouveau_clip: "Recherche", apercu: "Aperçu", analyse: "Analyse", titres: "Titres" };
   $("#jobs-barre").innerHTML = P.jobs.filter((j) => j.etat === "en_cours" && j.type !== "analyse")
     .map((j) => `<span class="job-pilule">${libelles[j.type] || j.type}<i style="--p:${j.pct}%"></i>${j.pct}%</span>`).join("");
 }
@@ -695,6 +695,7 @@ async function envoyerMessage(texte) {
     envoiChat = false;
     fusionner(e);
     afficherChat();
+    if (e.propositions) afficherIdees(e.propositions);
     const c = clip();
     if (c && avant && (c.debut !== avant.debut || c.fin !== avant.fin)) {
       libre = false; video.currentTime = c.debut; video.play().catch(() => {});
@@ -771,6 +772,44 @@ for (const [id, quoi] of [["#soustitre", "sous"], ["#titre-ecran", "titre"]]) {
 
 api("/api/version").then(v => $$("[data-version]").forEach(e => { e.textContent = "v" + v.version; }))
   .catch(() => {});
+
+/* Titres proposés par l'IA d'après ce qui est dit dans le clip */
+function afficherIdees(titres) {
+  const box = $("#idees");
+  box.hidden = false;
+  box.innerHTML = titres.map((t) => `<button type="button" class="idee">${echap(t)}</button>`).join("") +
+    `<button type="button" class="idee autre" data-autre>↻ D'autres idées</button>`;
+}
+async function chercherIdees() {
+  const c = clip(); if (!c) return;
+  const box = $("#idees");
+  box.hidden = false;
+  box.innerHTML = `<span class="doux petit-texte">L'IA lit le clip et cherche des titres…</span>`;
+  try {
+    const { titres } = await api(`/api/projets/${P.id}/clips/${c.id}/titres`, { body: {} });
+    if (clip()?.id === c.id) afficherIdees(titres);
+  } catch (err) { box.innerHTML = `<span class="doux petit-texte">${echap(err.message)}</span>`; }
+}
+$("#btn-idees").addEventListener("click", chercherIdees);
+$("#idees").addEventListener("click", (e) => {
+  const b = e.target.closest(".idee"); if (!b) return;
+  if (b.dataset.autre !== undefined) { chercherIdees(); return; }
+  const c = clip(); if (!c) return;
+  c.titre = b.textContent;
+  $("#titre-clip").value = c.titre;
+  $$("#idees .idee").forEach((x) => x.classList.toggle("choisie", x === b));
+  afficherClips(false); rendreTitre(c);
+  planifierPatch({ titre: c.titre }, 0);
+  toast("Titre appliqué");
+});
+$("#btn-titrer-tous").addEventListener("click", async () => {
+  if (!P?.clips.length) return;
+  if (!confirm(`Donner un nouveau titre aux ${P.clips.length} clips, d'après ce qui est dit dedans ?`)) return;
+  await envoyerPatchMaintenant();
+  const job = await api(`/api/projets/${P.id}/titrer-tous`, { body: {} });
+  P.jobs.push(job); afficherJobs(); planifierPoll(400);
+  toast("Je cherche un titre pour chaque clip…");
+});
 
 /* Double-clic sur le titre dans la vidéo : on le retape sur place */
 $("#titre-ecran").addEventListener("dblclick", (e) => {

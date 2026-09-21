@@ -26,7 +26,8 @@ CE_QUE_JE_SAIS_FAIRE = (
     "• sous-titres : « en jaune », « plus gros », « en haut », « 2 mots à la fois », « karaoké en rose », « sans majuscules »\n"
     "• titre à l'écran : « mets le titre et le numéro de partie », « enlève le titre »\n"
     "• cadrage : « plein écran », « fond flou », « cadre plus à gauche »\n"
-    "• « renomme le clip en … », « trouve-moi un passage drôle », « exporte », « annule »\n"
+    "• titres : « trouve-moi un titre », « donne un titre à tous les clips », « renomme le clip en … »\n"
+    "• « trouve-moi un passage drôle », « exporte », « annule »\n"
     "Ajoute « sur tous les clips » pour appliquer partout."
 )
 MOTS_TOUS = r"\b(tous|toutes|toute les|chaque|partout|les autres)\b"
@@ -212,7 +213,7 @@ def appliquer(projet, clip, actions):
                 avant_modif()
                 clip["titre"] = str(a["texte"]).strip()[:80]
                 fait.append(f"renommé « {clip['titre']} »")
-            elif typ in ("tous", "aide"):
+            elif typ in ("tous", "aide", "proposer_titres", "titrer_tous"):
                 speciales.append(typ)
             elif typ == "annuler":
                 speciales.append("annuler")
@@ -243,6 +244,12 @@ def lecture_rapide(message, historique=None):
         return [{"type": "annuler"}]
     if re.search(r"(qu.?est.?ce que tu (sais|peux) faire|tu sais faire quoi|tu peux faire quoi|^aide\W*$|^help\W*$|quelles? commandes?)", t):
         return [{"type": "aide"}]
+    # « trouve-moi un titre », « propose des titres », « donne un titre à tous les clips »
+    if re.search(r"\b(trouve|propose|donne|invente|genere|fais|ecris|idee)\w*\b.{0,25}\btitres?\b|\btitres?\b.{0,15}\b(accrocheur|stylé|style|viral)", t) \
+            and not re.search(r"\ben haut\b|a l.?ecran|sur la video", t):
+        if re.search(MOTS_TOUS, t):
+            return [{"type": "titrer_tous"}]
+        return [{"type": "proposer_titres"}]
     if re.search(r"\b(exporte|exporter|enregistre|telecharge|sors?[- ]moi le (clip|mp4))\b", t):
         return [{"type": "exporter"}]
     if re.search(r"\b(un autre|nouveau|nouvel|trouve[- ]moi|cherche[- ]moi|cherche)\s+(\w+\s+){0,3}?(clip|passage|extrait|moment)", t):
@@ -370,6 +377,9 @@ def lecture_rapide(message, historique=None):
         elif sens and titre_seul:
             actions.append({"type": "texte_ecran", "position_rel": 5 * sens})
 
+    if ecrire:
+        # « écris X en haut » parle du texte à l'écran, pas de la position des sous-titres
+        actions = [x for x in actions if not (x["type"] == "sous_titres" and set(x) <= {"type", "position"})]
     if actions and re.search(MOTS_TOUS, t):
         actions.append({"type": "tous"})
     return actions
@@ -494,6 +504,56 @@ def demander_ia(projet, clip, message, historique):
     return reponse, actions if isinstance(actions, list) else []
 
 
+# ----------------------------------------------------------------------
+# Titres tirés du contenu du clip
+# ----------------------------------------------------------------------
+CONSIGNE_TITRES = """Tu écris des titres de vidéos TikTok en français.
+On te donne ce qui est dit dans UN clip. Propose {n} titres différents :
+- courts (6 mots maximum, 45 caractères maximum), accrocheurs, qui donnent envie de regarder ;
+- fidèles à ce qui est VRAIMENT dit dans le clip (n'invente rien) ;
+- styles variés : une question, une affirmation choc, un « POV » ou « Quand… » ;
+- pas de hashtag, pas de guillemets, au plus un emoji.
+Réponds UNIQUEMENT avec ce JSON : {{"titres": ["titre 1", "titre 2"]}}"""
+
+
+def _titre_secours(texte_clip):
+    """Sans IA : la première phrase du clip, raccourcie."""
+    phrases = [p for p in re.split(r"(?<=[.?!])\s", texte_clip.strip()) if p.strip()] or ["Extrait"]
+    # la 1ʳᵉ vraie phrase (le clip commence souvent en plein milieu d'une phrase)
+    phrase = next((p for p in phrases if len(p.split()) >= 4), phrases[0])
+    mots = phrase.split()
+    titre = " ".join(mots[:7]).rstrip(",;:.") + ("…" if len(mots) > 7 else "")
+    return titre[:1].upper() + titre[1:]
+
+
+def proposer_titres(projet, clip, n=3):
+    """Titres accrocheurs d'après la transcription du clip. Retourne toujours au moins un titre."""
+    texte_clip = " ".join(w["text"] for w in mots_du_passage(projet.get("segments", []), clip["debut"], clip["fin"]))
+    if not texte_clip.strip():
+        return [clip.get("titre") or "Extrait"]
+    modele = modele_ia.actif()
+    try:
+        r = requests.post(OLLAMA_URL, json={
+            "model": modele, "format": "json", "stream": False,
+            **({"think": False} if modele.startswith("qwen3") else {}),
+            "messages": [{"role": "system", "content": CONSIGNE_TITRES.format(n=n)},
+                         {"role": "user", "content": f"Ce qui est dit dans le clip :\n{texte_clip[:3000]}"}],
+            "options": {"temperature": 0.8, "num_ctx": 4096},
+        }, timeout=180)
+        r.raise_for_status()
+        brut = r.json()["message"]["content"]
+        m = re.search(r"\{.*\}", brut, re.S)
+        titres = json.loads(m.group(0) if m else brut).get("titres", [])
+    except Exception:  # noqa: BLE001 — IA indisponible : on propose quand même quelque chose
+        titres = []
+    propres = []
+    for t in titres if isinstance(titres, list) else []:
+        t = re.sub(r"#\w+", "", str(t)).strip(" \"«»'").strip()
+        if 2 <= len(t) <= 80 and t.lower() not in (x.lower() for x in propres):
+            propres.append(t)
+    return propres[:n] or [_titre_secours(texte_clip)]
+
+
 def traiter_message(projet, clip, message, historique):
     """Retourne (reponse, speciales, rapide, actions)."""
     actions = lecture_rapide(message, historique)
@@ -506,6 +566,15 @@ def traiter_message(projet, clip, message, historique):
     fait, speciales = appliquer(projet, clip, actions)
     if "aide" in speciales:
         return CE_QUE_JE_SAIS_FAIRE, speciales, rapide, actions
+    if "proposer_titres" in speciales:
+        titres = proposer_titres(projet, clip)
+        liste = "\n".join(f"{i}. {x}" for i, x in enumerate(titres, 1))
+        speciales.append(("titres", titres))
+        return (f"Idées de titre d'après ce qui est dit dans le clip :\n{liste}\n"
+                "Clique sur celui que tu veux (au-dessus des réglages)."), speciales, rapide, actions
+    if "titrer_tous" in speciales:
+        return ("Je trouve un titre pour chaque clip d'après ce qui y est dit, ça prend quelques secondes par clip…",
+                speciales, rapide, actions)
     if not rapide and not fait and not speciales and (_ressemble_a_un_ordre(message) or _promesse_vide(reponse, clip)):
         # L'IA n'a rien modifié : on ne la laisse pas prétendre le contraire.
         debut = ("Je n'ai pas bien compris ta question, tu peux reformuler ? "
