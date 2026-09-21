@@ -78,12 +78,13 @@ def dossier_modeles():
     return dossier
 
 
-def _extract_audio(video_path: str, tmp_dir: str, log) -> str:
-    """Extrait l'audio de la vidéo dans un fichier .wav temporaire propre."""
+def _extract_audio(video_path: str, tmp_dir: str, log, debut=None, fin=None) -> str:
+    """Extrait l'audio de la vidéo (ou d'une partie) dans un fichier .wav temporaire propre."""
     tmp_wav = os.path.join(tmp_dir, "audio.wav")
     log("  Extraction de l'audio (FFmpeg)...")
+    zone = (["-ss", f"{debut:.3f}"] if debut else []) + (["-to", f"{fin:.3f}"] if fin else [])
     try:
-        result = _executer(["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+        result = _executer(["ffmpeg", "-y", *zone, "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
                             "-acodec", "pcm_s16le", tmp_wav])
     except FileNotFoundError:
         raise RuntimeError("FFmpeg est introuvable. Réinstalle Studio Clips avec Studio-Clips.exe.") from None
@@ -97,7 +98,8 @@ def _extract_audio(video_path: str, tmp_dir: str, log) -> str:
     return tmp_wav
 
 
-def transcribe_video(video_path: str, model_size: str = "small", log=print):
+def transcribe_video(video_path: str, model_size: str = "small", log=print, device="cpu", compute="int8",
+                     beam=None, debut=None, fin=None):
     """
     Transcrit la vidéo.
 
@@ -106,33 +108,50 @@ def transcribe_video(video_path: str, model_size: str = "small", log=print):
         langue   : code de la langue détectée (« fr », « en »…)
     `log` peut lever une exception pour interrompre la transcription (bouton Arrêter).
     """
-    from faster_whisper import WhisperModel   # import lourd : seulement quand on transcrit
-
     tmp_dir = tempfile.mkdtemp(prefix="studio_audio_")
+    decalage = float(debut or 0)   # transcription d'une partie : on remet les temps dans la vidéo entière
     try:
-        audio_path = _extract_audio(video_path, tmp_dir, log)
-
-        log(f"  Chargement du modèle de transcription « {model_size} »...")
+        audio_path = _extract_audio(video_path, tmp_dir, log, debut, fin)
         try:
-            model = WhisperModel(model_size, device="cpu", compute_type="int8", download_root=dossier_modeles())
-        except Exception as e:  # noqa: BLE001 — modèle absent et pas d'internet, disque plein…
-            print("Chargement Whisper impossible :", repr(e), flush=True)
-            raise RuntimeError("Le module de transcription n'est pas prêt. Il faut internet une fois pour le "
-                               "télécharger : vérifie ta connexion puis clique sur Relancer.") from None
+            return _transcrire(audio_path, model_size, log, device, compute, beam, decalage)
+        except Exception as e:  # noqa: BLE001
+            # « Arrêter » cliqué, ou vrai problème de modèle : on ne relance surtout pas sur le processeur
+            if device == "cpu" or type(e).__name__ == "Arret" or (isinstance(e, RuntimeError) and "prêt" in str(e)):
+                raise
+            # souci avec la carte graphique (pilote, mémoire…) : on refait tout sur le processeur
+            print("Transcription sur carte graphique impossible, retour au processeur :", repr(e), flush=True)
+            log("  La carte graphique n'a pas pu servir : transcription sur le processeur…")
+            return _transcrire(audio_path, "small" if model_size != "base" else "base", log, "cpu", "int8", 1, decalage)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        log("  Transcription en cours (ça peut prendre plusieurs minutes)...")
-        # PC modeste (modèle léger) : recherche simple, ~2x plus rapide.
-        beam = 5 if model_size in ("small", "medium", "large-v3") else 1
-        segments_raw, info = model.transcribe(
-            audio_path, beam_size=beam, word_timestamps=True, vad_filter=True,
-            # sans ça, Whisper peut répéter la même phrase en boucle sur de la musique
-            condition_on_previous_text=False,
-        )
 
-        segments, lignes = [], []
-        duree = info.duration or 0
-        palier = 0
-        for seg in segments_raw:   # générateur : la transcription se fait pendant cette boucle
+def _transcrire(audio_path, model_size, log, device, compute, beam, decalage):
+    from faster_whisper import WhisperModel
+
+    log(f"  Chargement du modèle de transcription « {model_size} » ({'carte graphique' if device == 'cuda' else 'processeur'})...")
+    try:
+        model = WhisperModel(model_size, device=device, compute_type=compute, download_root=dossier_modeles(),
+                             cpu_threads=(os.cpu_count() or 4) if device == "cpu" else 0)
+    except Exception as e:  # noqa: BLE001 — modèle absent et pas d'internet, disque plein…
+        print("Chargement Whisper impossible :", repr(e), flush=True)
+        if device == "cuda":
+            raise
+        raise RuntimeError("Le module de transcription n'est pas prêt. Il faut internet une fois pour le "
+                           "télécharger : vérifie ta connexion puis clique sur Relancer.") from None
+
+    log("  Transcription en cours...")
+    if beam is None:
+        beam = 5 if device == "cuda" else 1
+    segments_raw, info = model.transcribe(
+        audio_path, beam_size=beam, word_timestamps=True, vad_filter=True,
+        # sans ça, Whisper peut répéter la même phrase en boucle sur de la musique
+        condition_on_previous_text=False,
+    )
+    segments, lignes = [], []
+    duree = info.duration or 0
+    palier = 0
+    for seg in segments_raw:   # générateur : la transcription se fait pendant cette boucle
             if duree:
                 pct = int(min(seg.end / duree, 1) * 100)
                 if pct >= palier + 5:
@@ -141,15 +160,13 @@ def transcribe_video(video_path: str, model_size: str = "small", log=print):
             text = seg.text.strip()
             if not text or getattr(seg, "no_speech_prob", 0) > 0.6 or HALLUCINATIONS.search(text):
                 continue
-            start, end = round(seg.start, 2), round(seg.end, 2)
-            words = [{"start": round(w.start, 2), "end": round(w.end, 2), "text": w.word.strip()}
+            start, end = round(seg.start + decalage, 2), round(seg.end + decalage, 2)
+            words = [{"start": round(w.start + decalage, 2), "end": round(w.end + decalage, 2), "text": w.word.strip()}
                      for w in (seg.words or []) if w.word.strip()]
             if segments and segments[-1]["text"] == text and start - segments[-1]["end"] < 2:
                 continue   # même phrase répétée à la suite = hallucination
             segments.append({"start": start, "end": end, "text": text, "words": words})
             lignes.append(f"[{start:.2f}s -> {end:.2f}s] {text}")
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     parle = segments[-1]["end"] - segments[0]["start"] if segments else 0
     log(f"  Langue détectée : {info.language} | parole détectée sur ~{parle:.0f}s")

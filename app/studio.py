@@ -38,15 +38,16 @@ if sys.stdout is None or not sys.stdout.isatty():
 
 from flask import Flask, jsonify, request, send_file, abort  # noqa: E402
 
+import acceleration  # noqa: E402
 import assistant  # noqa: E402
 import lanceur  # noqa: E402
 import modele_ia  # noqa: E402
 import montage  # noqa: E402
 import telechargement  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
-from transcribe import transcribe_video, get_video_duration, codec_video as montage_codec  # noqa: E402
+from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.1"
+VERSION = "3.2"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -159,6 +160,7 @@ def vue_clip(c, p=None):
     v["numero"] = p["clips"].index(c) + 1 if p and c in p["clips"] else None
     v["style"] = {**montage.STYLE_DEFAUT, **c.get("style", {})}
     v["cadrage"] = {**montage.CADRAGE_DEFAUT, **c.get("cadrage", {})}
+    v["montage"] = {**montage.MONTAGE_DEFAUT, **c.get("montage", {})}
     return v
 
 
@@ -176,7 +178,10 @@ def vue_projet(p, avec_segments=True):
 
 
 def nouveau_clip(c, segments):
-    fin = assistant._fin_sur_un_mot(segments, c["start"], c["end"])
+    # Les blancs seront coupés : on prend un peu plus large pour que le clip MONTÉ garde la durée voulue.
+    fin_max = segments[-1]["end"] if segments else c["end"]
+    fin = montage.fin_pour_duree(segments, c["start"], c["end"] - c["start"], None, fin_max)
+    fin = assistant._fin_sur_un_mot(segments, c["start"], fin)
     return {
         "id": uuid.uuid4().hex[:8], "titre": c.get("title") or "Extrait", "raison": c.get("reason", ""),
         "note": c.get("score", 5), "debut": round(c["start"], 2), "fin": max(round(c["start"] + 3, 2), fin),
@@ -343,9 +348,11 @@ def job_analyse(pid):
                         if m:
                             job["pct"] = base_transcription + int(int(m.group(1)) * (66 - base_transcription) / 100)
                     job["pct"] = base_transcription
-                    # Modèle de transcription selon la puissance du PC (base = ~3x plus rapide que small)
-                    taille_whisper = "small" if modele_ia.ram_go() >= 15 else "base"
-                    segments, _, langue = transcribe_video(p["source"], model_size=taille_whisper, log=log_transcription)
+                    # Carte graphique NVIDIA si possible, sinon processeur (modèle selon la mémoire du PC)
+                    taille, appareil, precision, largeur = acceleration.choix_transcription(modele_ia.ram_go())
+                    segments, _, langue = transcribe_video(
+                        p["source"], model_size=taille, log=log_transcription, device=appareil, compute=precision,
+                        beam=largeur, debut=p.get("debut_zone"), fin=p.get("fin_zone"))
                     p["segments"], p["langue"], p["transcrit"] = segments, langue, True
                     p["duree"] = get_video_duration(p["source"]) or (segments[-1]["end"] if segments else 0)
                     sauver(p)
@@ -473,7 +480,7 @@ NOMS_RESERVES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(
 
 
 def _empreinte(c):
-    return json.dumps([c.get(k) for k in ("debut", "fin", "style", "cadrage", "texte", "titre")], sort_keys=True)
+    return json.dumps([c.get(k) for k in ("debut", "fin", "style", "cadrage", "texte", "titre", "montage")], sort_keys=True)
 
 
 def job_export(pid, cid):
@@ -504,7 +511,8 @@ def job_export(pid, cid):
 
             def prog(pct):
                 job["pct"] = pct
-            montage.exporter_clip(p["source"], p["segments"], a_exporter, sortie, prog)
+            montage.exporter_clip(p["source"], p["segments"], a_exporter, sortie, prog,
+                                  avec_son=a_du_son(p["source"]) is not False)
             job["resultat"] = sortie
             taille = montage.dimensions(sortie)
             format_ = f" — {taille[0]}×{taille[1]}" + (" (format TikTok ✔)" if taille[0] < taille[1] else "") if taille else ""
@@ -588,13 +596,21 @@ def creer_projet():
         site = urlparse(lien).netloc.lower().removeprefix("www.").removeprefix("m.") or "internet"
         nom, duree = f"Vidéo en ligne ({site})", None
     elif os.path.isfile(source):
+        try:
+            debut_z, fin_z = telechargement.lire_heure(d.get("debut")), telechargement.lire_heure(d.get("fin"))
+        except ValueError as e:
+            return jsonify({"erreur": str(e)}), 400
+        if debut_z is not None and fin_z is not None and fin_z <= debut_z:
+            return jsonify({"erreur": "L'heure de fin doit être après l'heure de début."}), 400
         debut = fin = None
         nom, duree = os.path.splitext(os.path.basename(source))[0], get_video_duration(source)
+        if duree and debut_z and debut_z >= duree:
+            return jsonify({"erreur": f"Le début demandé dépasse la fin de la vidéo (elle dure {int(duree // 60)} min)."}), 400
     else:
         return jsonify({"erreur": "Vidéo introuvable."}), 400
     pid = uuid.uuid4().hex[:12]
     p = {"id": pid, "nom": nom, "source": "" if lien else source, "lien": lien, "debut_lien": debut,
-         "fin_lien": fin, "consigne": consigne, "cree": datetime.now().isoformat(timespec="seconds"),
+         "fin_lien": fin, "debut_zone": None if lien else debut_z, "fin_zone": None if lien else fin_z, "consigne": consigne, "cree": datetime.now().isoformat(timespec="seconds"),
          "etat": "traitement", "erreur": None, "duree": duree, "segments": [], "clips": [], "chat": []}
     sauver(p, creer=True)
     job_analyse(pid)
@@ -721,6 +737,8 @@ def modifier_clip(pid, cid):
             actions.append({"type": "cadrage", **d["cadrage"]})
         if isinstance(d.get("texte"), dict):
             actions.append({"type": "texte_ecran", **d["texte"]})
+        if isinstance(d.get("montage"), dict):
+            actions.append({"type": "montage", **d["montage"]})
         if d.get("titre"):
             actions.append({"type": "titre", "texte": d["titre"]})
         historique_avant = len(c.get("historique", []))
@@ -743,7 +761,7 @@ def appliquer_a_tous(pid, cid):
             if c is modele:
                 continue
             assistant.memoriser(c)
-            for champ in ("style", "cadrage", "texte"):
+            for champ in ("style", "cadrage", "texte", "montage"):
                 c[champ] = copy.deepcopy(modele.get(champ, {}))
             c["texte"]["contenu"] = ""   # chaque clip garde SON titre, pas celui du modèle
             c["texte"]["numero"] = None
@@ -808,7 +826,8 @@ def exporter_tout(pid):
     return jsonify(lances)
 
 
-TYPES_MONTAGE = ("couper_debut", "couper_fin", "bornes", "duree", "sous_titres", "cadrage", "texte_ecran", "titre")
+TYPES_MONTAGE = ("couper_debut", "couper_fin", "bornes", "duree", "sous_titres", "cadrage", "texte_ecran", "titre",
+                 "montage")
 
 
 @app.post("/api/projets/<pid>/chat")
@@ -956,7 +975,8 @@ def quitter():
 
 @app.get("/api/ia")
 def etat_ia():
-    return jsonify({**modele_ia.etat, "actif": modele_ia.actif()})
+    return jsonify({**modele_ia.etat, "actif": modele_ia.actif(),
+                    "acceleration": {k: acceleration.etat[k] for k in ("gpu", "etat", "message")}})
 
 
 @app.post("/api/ping")
@@ -1091,6 +1111,7 @@ def main():
     threading.Thread(target=surveiller_fermeture, daemon=True).start()
     threading.Thread(target=modele_ia.preparer, daemon=True).start()
     threading.Thread(target=reparer_raccourci, daemon=True).start()
+    acceleration.lancer_en_fond(APP)
     threading.Thread(target=mettre_a_jour_ytdlp, daemon=True).start()
     if "--sans-fenetre" not in sys.argv:
         threading.Timer(1.0, ouvrir_fenetre, args=(f"http://127.0.0.1:{port}/",)).start()

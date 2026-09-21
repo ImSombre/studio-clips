@@ -9,6 +9,7 @@ Les sous-titres sont écrits en .ass sur une base 1080x1920 : toutes les
 tailles ci-dessous sont en vrais pixels de la vidéo finale.
 """
 
+import math
 import os
 import re
 import subprocess
@@ -131,7 +132,129 @@ def ligne_titre(texte, titre, numero, duree):
 LANGUES_SANS_ESPACES = ("zh", "ja", "ko", "th", "yue", "lo", "my")
 
 
-def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue="fr"):
+# ----------------------------------------------------------------------
+# Montage automatique : coupes des blancs, zooms, accroche, barre de progression
+# (studio.js reproduit EXACTEMENT les mêmes calculs pour l'aperçu)
+# ----------------------------------------------------------------------
+MONTAGE_DEFAUT = {"coupes": True, "zooms": True, "anim": True, "accroche": True, "barre": True}
+FPS = 30
+TROU_MIN = 0.45          # silence (s) à partir duquel on coupe
+MARGE = 0.12             # on garde un peu d'air avant/après chaque mot
+HESITATIONS = {"euh", "heu", "euuh", "hum", "hmm", "hmmm", "humm", "uh", "um", "uhm", "erm"}
+CYCLE_ZOOMS = (1.0, 1.12, 1.04, 1.16)
+PLAN_MAX = 6.0           # un plan plus long change de zoom à mi-parcours (sinon c'est figé)
+MOTS_VIDES = {
+    "alors", "aussi", "avait", "avant", "avec", "cette", "comme", "comment", "dans", "depuis", "donc", "elle", "elles",
+    "encore", "entre", "est-ce", "faire", "fait", "jamais", "juste", "leurs", "mais", "même", "moins", "notre",
+    "nous", "parce", "pendant", "peut", "plus", "pour", "pourquoi", "quand", "quelque", "sans", "sont", "sous",
+    "tout", "toute", "toutes", "tous", "très", "trop", "vais", "votre", "vous", "about", "after", "again", "because",
+    "before", "being", "could", "their", "there", "these", "thing", "think", "those", "would", "really", "right",
+}
+
+
+def _norm(t):
+    return re.sub(r"[^\w]", "", (t or "").lower())
+
+
+def blocs_gardes(segments, debut, fin, montage=None):
+    """Passages conservés [(a, b)] en temps de la vidéo source. Sans « coupes » : le clip entier."""
+    m = {**MONTAGE_DEFAUT, **(montage or {})}
+    if not m["coupes"]:
+        return [(debut, fin)]
+    mots = [w for w in mots_du_passage(segments, debut, fin) if _norm(w["text"]) not in HESITATIONS]
+    if not mots:
+        return [(debut, fin)]
+    blocs, fin_mot = [], None
+    for w in mots:
+        if blocs and w["start"] - fin_mot <= TROU_MIN:
+            blocs[-1][1] = min(fin, w["end"] + MARGE)
+        else:
+            blocs.append([max(debut, w["start"] - MARGE), min(fin, w["end"] + MARGE)])
+        fin_mot = w["end"]
+    res = []
+    for a, b in blocs:   # calés sur la grille des images : son et image restent synchronisés
+        a = debut + math.floor((a - debut) * FPS) / FPS
+        b = min(fin, debut + math.ceil((b - debut) * FPS) / FPS)
+        if res and a <= res[-1][1]:
+            res[-1][1] = max(res[-1][1], b)
+        elif b - a >= 0.2:
+            res.append([a, b])
+    return [tuple(x) for x in res] or [(debut, fin)]
+
+
+def duree_montee(blocs):
+    return sum(b - a for a, b in blocs)
+
+
+def vers_sortie(t, blocs):
+    """Instant t de la source -> instant dans le clip monté."""
+    total = 0.0
+    for a, b in blocs:
+        if t < a:
+            return total
+        if t <= b:
+            return total + (t - a)
+        total += b - a
+    return total
+
+
+def fin_pour_duree(segments, debut, voulu, montage, fin_max):
+    """Fin à donner au clip pour qu'APRÈS suppression des blancs il dure `voulu` secondes."""
+    fin_max = max(debut + 3, fin_max)
+    m = {**MONTAGE_DEFAUT, **(montage or {})}
+    bas = min(debut + voulu, fin_max)
+    if not m["coupes"] or duree_montee(blocs_gardes(segments, debut, bas, m)) >= voulu - 0.3:
+        return bas
+    haut = min(fin_max, debut + voulu * 1.8)
+    for _ in range(18):
+        milieu = (bas + haut) / 2
+        if duree_montee(blocs_gardes(segments, debut, milieu, m)) < voulu:
+            bas = milieu
+        else:
+            haut = milieu
+    return haut
+
+
+def plans_zoom(blocs, montage=None):
+    """[(image_debut, image_fin, zoom)] dans le clip monté : un zoom différent à chaque coupe."""
+    m = {**MONTAGE_DEFAUT, **(montage or {})}
+    plans, image, k = [], 0, 0
+    for a, b in blocs:
+        n = round((b - a) * FPS)
+        morceaux = [n] if n <= PLAN_MAX * FPS else [n // 2, n - n // 2]
+        for taille in morceaux:
+            z = CYCLE_ZOOMS[k % len(CYCLE_ZOOMS)] if m["zooms"] else 1.0
+            plans.append((image, image + taille, z))
+            image += taille
+            k += 1
+    return plans
+
+
+def _expr_zoom(plans):
+    expr = f"{plans[-1][2]:.3f}"
+    for debut_i, fin_i, z in reversed(plans[:-1]):
+        expr = f"if(lt(on,{fin_i}),{z:.3f},{expr})"
+    return expr
+
+
+def mot_cle(mots):
+    """Index du mot à mettre en couleur dans un groupe (le plus « lourd »), ou None."""
+    meilleur, score = None, 0
+    for i, w in enumerate(mots):
+        n = _norm(w["texte"])
+        s = len(n) + (3 if any(c.isdigit() for c in n) else 0) + (2 if w["texte"].endswith("!") else 0)
+        if n in MOTS_VIDES or len(n) < 5:
+            continue
+        if s > score:
+            meilleur, score = i, s
+    return meilleur
+
+
+COULEUR_CLE = "#FFE14D"
+
+
+def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue="fr",
+               anim=False, accroche=None, barre_duree=None):
     s = {**STYLE_DEFAUT, **(style or {})}
     sep = "" if langue in LANGUES_SANS_ESPACES else " "
     y = int(HAUTEUR * max(5, min(95, float(s["position"]))) / 100)
@@ -146,13 +269,17 @@ def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue
         f"&H80000000,-1,0,0,0,100,100,0,0,1,{int(s['epaisseur'])},2,5,90,90,0,1\n"
         # BorderStyle 3 = boîte opaque derrière le texte (couleur = OutlineColour, marge = Outline)
         f"Style: Titre,Arial Black,{int(taille_titre or TEXTE_DEFAUT['taille'])},&H00FFFFFF,&H000000FF,"
-        "&H26000000,&H00000000,-1,0,0,0,100,100,0,0,3,16,0,8,90,90,0,1\n\n"
+        "&H26000000,&H00000000,-1,0,0,0,100,100,0,0,3,16,0,8,90,90,0,1\n"
+        "Style: Accroche,Arial Black,96,&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,9,4,5,70,70,0,1\n"
+        "Style: Barre,Arial,10,&H002E4DFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     lignes = [entete]
     if titre_ass:
         lignes.append(titre_ass)
     pos = f"{{\\an5\\pos(540,{y})}}"
+    rebond = "{\\fscx118\\fscy118\\t(0,110,\\fscx100\\fscy100)}"
+    cle = _couleur_ass(COULEUR_CLE)
 
     def mot(t):
         t = _texte_ass(t)
@@ -160,9 +287,12 @@ def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue
 
     for g in groupes:
         textes = [mot(w["texte"]) for w in g["mots"]]
+        i_cle = mot_cle(g["mots"]) if anim else None
+        if i_cle is not None:
+            textes[i_cle] = f"{{\\c{cle}}}{textes[i_cle]}{{\\c{blanc}}}"
         if not s.get("surligne"):
             lignes.append(f"Dialogue: 0,{_temps_ass(g['debut'])},{_temps_ass(g['fin'])},Default,,0,0,0,,"
-                          f"{pos}{sep.join(textes)}")
+                          f"{pos}{rebond if anim else ''}{sep.join(textes)}")
             continue
         # Karaoké : un évènement par mot, le mot en cours prend la couleur de surlignage.
         jaune = _couleur_ass(s["surligne"])
@@ -171,12 +301,38 @@ def ecrire_ass(groupes, style, chemin, titre_ass=None, taille_titre=None, langue
             b = g["mots"][k + 1]["debut"] if k + 1 < len(g["mots"]) else g["fin"]
             if b - a < 0.01:
                 continue
-            morceaux = [
-                f"{{\\c{jaune}}}{t}{{\\c{blanc}}}" if i == k else t for i, t in enumerate(textes)
-            ]
-            lignes.append(f"Dialogue: 0,{_temps_ass(a)},{_temps_ass(b)},Default,,0,0,0,,{pos}{sep.join(morceaux)}")
+            brut = mot(w["texte"])
+            morceaux = [f"{{\\c{jaune}}}{brut}{{\\c{blanc}}}" if i == k else t for i, t in enumerate(textes)]
+            anime = rebond if anim and k == 0 else ""
+            lignes.append(f"Dialogue: 0,{_temps_ass(a)},{_temps_ass(b)},Default,,0,0,0,,{pos}{anime}{sep.join(morceaux)}")
+
+    if accroche:
+        texte, duree = accroche
+        yc = int(HAUTEUR * 0.40)
+        lignes.append(f"Dialogue: 2,{_temps_ass(0)},{_temps_ass(duree)},Accroche,,0,0,0,,"
+                      f"{{\\an5\\pos(540,{yc})\\fad(0,250)\\fscx70\\fscy70\\t(0,160,\\fscx106\\fscy106)"
+                      f"\\t(160,260,\\fscx100\\fscy100)}}{_texte_ass(texte).upper()}")
+    if barre_duree:
+        ms = int(barre_duree * 1000)
+        fond = "m 0 0 l 1080 0 1080 14 0 14"
+        lignes.append(f"Dialogue: 3,{_temps_ass(0)},{_temps_ass(barre_duree)},Barre,,0,0,0,,"
+                      f"{{\\an7\\pos(0,1906)\\c&HFFFFFF&\\1a&HB4&\\p1}}{fond}{{\\p0}}")
+        lignes.append(f"Dialogue: 4,{_temps_ass(0)},{_temps_ass(barre_duree)},Barre,,0,0,0,,"
+                      f"{{\\an7\\pos(0,1906)\\clip(0,1900,0,1920)\\t(0,{ms},\\clip(0,1900,1080,1920))\\p1}}{fond}{{\\p0}}")
     with open(chemin, "w", encoding="utf-8") as f:
         f.write("\n".join(lignes) + "\n")
+
+
+def _vers_sortie_groupes(groupes, debut, blocs):
+    """Les sous-titres sont calculés en temps du clip source : on les recale sur le clip monté."""
+    res = []
+    for g in groupes:
+        mots = [{**w, "debut": vers_sortie(debut + w["debut"], blocs), "fin": vers_sortie(debut + w["fin"], blocs)}
+                for w in g["mots"]]
+        a, b = vers_sortie(debut + g["debut"], blocs), vers_sortie(debut + g["fin"], blocs)
+        if b - a >= 0.05:
+            res.append({"debut": a, "fin": b, "mots": mots})
+    return res
 
 
 # ----------------------------------------------------------------------
@@ -196,6 +352,37 @@ def _filtre_video(cadrage):
     ])
 
 
+def graphe_filtres(debut, blocs, cadrage, montage, avec_son=True):
+    """Graphe FFmpeg : passages gardés -> cadrage 9:16 -> zooms -> sous-titres (+ son recollé)."""
+    m = {**MONTAGE_DEFAUT, **(montage or {})}
+    # Passages en NUMÉROS d'image (entiers, donc exacts) : avec des heures arrondies, chaque coupe
+    # pouvait prendre une image de trop, et sur 60 coupes l'image dérivait de 0,4 s par rapport au son.
+    images = [(round((a - debut) * FPS), round((b - debut) * FPS)) for a, b in blocs]
+    images = [(ia, ib) for ia, ib in images if ib > ia]
+    rel = [(ia / FPS, ib / FPS) for ia, ib in images]
+    choix = "+".join(f"between(n,{ia},{ib - 1})" for ia, ib in images)
+    # fps (départ forcé à 0) puis select : l'image n tombe exactement à n/30 s
+    graphe = f"[0:v]fps={FPS}:start_time=0,select='{choix}',setpts=N/{FPS}/TB," + _filtre_video(cadrage)
+    dernier = "v0"
+    if m["zooms"]:
+        plans = plans_zoom(blocs, m)
+        graphe += (f";[v0]zoompan=z='{_expr_zoom(plans)}':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*0.42'"
+                   f":d=1:s={LARGEUR}x{HAUTEUR}:fps={FPS},setsar=1[vz]")
+        dernier = "vz"
+    graphe += f";[{dernier}]ass=subs.ass[vout]"
+    if avec_son:
+        if len(rel) == 1:
+            graphe += f";[0:a]atrim=start={rel[0][0]:.6f}:end={rel[0][1]:.6f},asetpts=PTS-STARTPTS[aout]"
+        else:
+            # le son est recollé morceau par morceau, à l'échantillon près (atrim + concat)
+            noms = "".join(f"[a{i}]" for i in range(len(rel)))
+            graphe += f";[0:a]asplit={len(rel)}{noms}"
+            for i, (a, b) in enumerate(rel):
+                graphe += f";[a{i}]atrim=start={a:.6f}:end={b:.6f},asetpts=PTS-STARTPTS[t{i}]"
+            graphe += ";" + "".join(f"[t{i}]" for i in range(len(rel))) + f"concat=n={len(rel)}:v=0:a=1[aout]"
+    return graphe
+
+
 def chemin_unique(chemin):
     if not os.path.exists(chemin):
         return chemin
@@ -206,29 +393,37 @@ def chemin_unique(chemin):
     return f"{base} ({n}){ext}"
 
 
-def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None):
+def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, avec_son=True):
     """Fabrique le MP4 final. progression(pct) est appelée pendant l'encodage."""
     debut, fin = float(clip["debut"]), float(clip["fin"])
-    duree = fin - debut
     style = {**STYLE_DEFAUT, **(clip.get("style") or {})}
+    montage = {**MONTAGE_DEFAUT, **(clip.get("montage") or {})}
+    blocs = blocs_gardes(segments, debut, fin, montage)
+    duree_sortie = duree_montee(blocs)
     groupes = groupes_sous_titres(mots_du_passage(segments, debut, fin), debut, fin, int(style["mots"]))
+    groupes = _vers_sortie_groupes(groupes, debut, blocs)
 
     dossier_tmp = tempfile.mkdtemp(prefix="studio_export_")
     try:
         texte = {**TEXTE_DEFAUT, **(clip.get("texte") or {})}
-        titre_ass = ligne_titre(texte, clip.get("titre"), clip.get("numero"), duree)
+        titre_ass = ligne_titre(texte, clip.get("titre"), clip.get("numero"), duree_sortie)
+        accroche = None
+        if montage["accroche"]:
+            accroche = ((texte.get("contenu") or "").strip() or clip.get("titre") or "", min(2.5, duree_sortie))
         ecrire_ass(groupes, style, os.path.join(dossier_tmp, "subs.ass"), titre_ass, texte["taille"],
-                   clip.get("langue", "fr"))
+                   clip.get("langue", "fr"), anim=montage["anim"], accroche=accroche if accroche and accroche[0] else None,
+                   barre_duree=duree_sortie if montage["barre"] else None)
         # On encode dans un fichier provisoire : un export raté ne laisse jamais de MP4 coupé.
         provisoire = os.path.splitext(os.path.abspath(sortie))[0] + ".encodage.mp4"
         # FFmpeg tourne DEPUIS le dossier temporaire : le nom du .ass est donné seul,
         # donc aucun souci d'échappement (apostrophes, « : », espaces dans les chemins).
-        filtre = "[0:v]" + _filtre_video(clip.get("cadrage")) + ";[v0]ass=subs.ass[vout]"
+        filtre = graphe_filtres(debut, blocs, clip.get("cadrage"), montage, avec_son)
         cmd = [
-            "ffmpeg", "-y", "-ss", f"{debut:.3f}", "-i", os.path.abspath(source), "-t", f"{duree:.3f}",
-            "-filter_complex", filtre, "-map", "[vout]", "-map", "0:a:0?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            "ffmpeg", "-y", "-ss", f"{debut:.3f}", "-i", os.path.abspath(source), "-t", f"{fin - debut:.3f}",
+            "-filter_complex", filtre, "-map", "[vout]",
+            *(["-map", "[aout]"] if avec_son else []),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS),
+            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
             "-progress", "pipe:1", "-nostats", provisoire,
         ]
         journal = os.path.join(dossier_tmp, "ffmpeg.log")
@@ -236,21 +431,23 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None):
             try:
                 proc = subprocess.Popen(
                     cmd, cwd=dossier_tmp, stdout=subprocess.PIPE, stderr=err, text=True,
+                    encoding="utf-8", errors="replace",
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except FileNotFoundError:
-                raise RuntimeError("FFmpeg est introuvable : relance INSTALLER.bat.") from None
+                raise RuntimeError("FFmpeg est introuvable. Réinstalle Studio Clips avec Studio-Clips.exe.") from None
             for ligne in proc.stdout:
                 if ligne.startswith("out_time_us=") or ligne.startswith("out_time_ms="):
                     try:
                         t = int(ligne.split("=", 1)[1]) / 1_000_000
-                        progression(min(99, int(t / duree * 100)))
+                        progression(min(99, int(t / max(duree_sortie, 0.1) * 100)))
                     except ValueError:
                         pass
             proc.wait()
         if proc.returncode != 0:
             with open(journal, encoding="utf-8", errors="replace") as f:
-                print("Export FFmpeg échoué :", f.read()[-2000:], flush=True)
+                print("Export FFmpeg échoué :", f.read()[-2500:], flush=True)
+            print("Graphe :", filtre[:3000], flush=True)
             try:
                 os.remove(provisoire)
             except OSError:

@@ -39,7 +39,7 @@
                placeholder="Colle un lien : YouTube, rediffusion Twitch, TikTok, Kick…" aria-label="Lien de la vidéo">
       </div>
       <div id="plage" class="plage" hidden>
-        <span>Seulement une partie <em>(facultatif, conseillé pour une longue rediff)</em> :</span>
+        <span>Seulement une partie <em>(facultatif, beaucoup plus rapide sur une longue vidéo)</em> :</span>
         <label>de <input id="lien-de" placeholder="1:20:00" aria-label="Début"></label>
         <label>à <input id="lien-a" placeholder="2:05:00" aria-label="Fin"></label>
       </div>
@@ -114,8 +114,12 @@
         <div class="scene">
           <div class="telephone">
             <div class="ecran-video" id="ecran-video">
-              <canvas id="fond" width="72" height="128"></canvas>
-              <video id="lecteur" preload="auto" playsinline></video>
+              <div id="calque" class="calque">
+                <canvas id="fond" width="72" height="128"></canvas>
+                <video id="lecteur" preload="auto" playsinline></video>
+              </div>
+              <div id="accroche" class="accroche" hidden></div>
+              <div id="barre-prog" class="barre-prog" hidden><i></i></div>
               <div id="titre-ecran" class="titre-ecran"></div>
               <div id="soustitre" class="soustitre"></div>
               <div id="apercu-msg" class="apercu-msg" hidden></div>
@@ -135,6 +139,17 @@
               <button id="btn-titrer-tous" class="bouton-fantome petit-texte" type="button">Titrer tous les clips</button>
             </div>
             <div id="idees" class="idees" hidden></div>
+
+            <div class="groupe">
+              <div class="groupe-titre">Montage auto</div>
+              <div class="bascules-montage" id="r-montage">
+                <button type="button" class="bascule texte" data-m="coupes" title="Supprime les silences et les « euh »">Couper les blancs</button>
+                <button type="button" class="bascule texte" data-m="zooms" title="Petit zoom à chaque coupe">Zooms</button>
+                <button type="button" class="bascule texte" data-m="anim" title="Rebond + mot important en couleur">Sous-titres animés</button>
+                <button type="button" class="bascule texte" data-m="accroche" title="Gros titre pendant les 2,5 premières secondes">Accroche</button>
+                <button type="button" class="bascule texte" data-m="barre" title="Barre qui avance en bas de la vidéo">Barre</button>
+              </div>
+            </div>
 
             <div class="groupe">
               <div class="groupe-titre">Sous-titres</div>
@@ -228,6 +243,7 @@
           <div class="tl-graduations" id="tl-graduations"></div>
           <div class="tl-piste" id="tl-piste">
             <div class="tl-mots" id="tl-mots"></div>
+            <div class="tl-coupes" id="tl-coupes"></div>
             <div class="tl-zone" id="tl-zone">
               <span class="poignee" data-p="debut"></span>
               <span class="poignee" data-p="fin"></span>

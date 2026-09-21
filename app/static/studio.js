@@ -160,7 +160,7 @@ $("#btn-choisir").addEventListener("click", async () => {
 const lienValide = (t) => /^https?:\/\/\S+\.\S+/.test((t || "").trim());
 function majBoutonLancer() {
   const lien = $("#lien").value.trim();
-  $("#plage").hidden = !lienValide(lien);
+  $("#plage").hidden = !(lienValide(lien) || cheminChoisi);
   $("#btn-lancer").disabled = !(cheminChoisi || lienValide(lien));
   $(".zone-lien").classList.toggle("choisie", lienValide(lien));
   $(".zone-lien").classList.toggle("invalide", !!lien && !lienValide(lien));
@@ -188,7 +188,7 @@ $("#btn-lancer").addEventListener("click", async () => {
   try {
     const corps = lienValide(lien) && !cheminChoisi
       ? { lien, debut: $("#lien-de").value, fin: $("#lien-a").value, consigne: $("#consigne").value }
-      : { chemin: cheminChoisi, consigne: $("#consigne").value };
+      : { chemin: cheminChoisi, debut: $("#lien-de").value, fin: $("#lien-a").value, consigne: $("#consigne").value };
     const { id } = await api("/api/projets", { body: corps });
     cheminChoisi = ""; $("#consigne").value = "";
     $("#lien").value = ""; $("#lien-de").value = ""; $("#lien-a").value = ""; majBoutonLancer();
@@ -302,7 +302,7 @@ function afficherClips(reconstruire) {
     el.classList.toggle("actif", c.id === cur);
     $(".clip-titre", el).textContent = c.titre;
     const job = P.jobs.find((j) => j.clip === c.id && j.type === "export" && j.etat === "en_cours");
-    $(".clip-meta", el).innerHTML = `<span>${fmtCourt(c.fin - c.debut)}</span><span>★ ${Math.round(c.note)}</span>${c.exporte ? '<span class="ok">✔ exporté</span>' : ""}`;
+    $(".clip-meta", el).innerHTML = `<span>${fmtCourt(P.segments ? dureeMontee(calculerBlocs(c)) : c.fin - c.debut)}</span><span>★ ${Math.round(c.note)}</span>${c.exporte ? '<span class="ok">✔ exporté</span>' : ""}`;
     const pr = $(".clip-progression", el);
     pr.hidden = !job; if (job) $("i", pr).style.width = `${job.pct}%`;
     const vign = $(".clip-vignette", el), url = `/miniature/${P.id}/${c.id}?d=${c.debut}`;
@@ -410,7 +410,7 @@ function afficherMontage(bornesChangees) {
   remplirReglages(c);
   if (bornesChangees) { calculerFenetre(); dessinerTimeline(); }
   else majZone();
-  $("#chat-contexte").textContent = `Clip ${P.clips.indexOf(c) + 1} · ${fmtCourt(c.fin - c.debut)}`;
+  $("#chat-contexte").textContent = `Clip ${P.clips.indexOf(c) + 1} · ${fmtCourt(dureeMontee(blocs))}`;
 }
 
 function afficherMessageVideo(texte, introuvable = false) {
@@ -465,23 +465,131 @@ function basculerLecture() {
   if (video.paused) {
     const fin = Number.isFinite(video.duration) ? Math.min(c.fin, video.duration) : c.fin;
     if (libre) { /* écoute libre hors du clip : on repart d'où on est */ }
-    else if (video.ended || video.currentTime < c.debut - 0.05 || video.currentTime >= fin - 0.05) video.currentTime = c.debut;
+    else if (video.ended || video.currentTime < c.debut - 0.05 || video.currentTime >= fin - 0.05) video.currentTime = blocs[0]?.[0] ?? c.debut;
     video.play().catch(() => {});
   } else video.pause();
 }
 $("#btn-play").addEventListener("click", basculerLecture);
 $("#btn-grand-play").addEventListener("click", basculerLecture);
 
+/* =================== Montage automatique (mêmes calculs que montage.py) =================== */
+const FPS = 30, TROU_MIN = 0.45, MARGE = 0.12, PLAN_MAX = 6.0, DUREE_ACCROCHE = 2.5;
+const CYCLE_ZOOMS = [1.0, 1.12, 1.04, 1.16];
+const HESITATIONS = new Set(["euh", "heu", "euuh", "hum", "hmm", "hmmm", "humm", "uh", "um", "uhm", "erm"]);
+const MOTS_VIDES = new Set(("alors aussi avait avant avec cette comme comment dans depuis donc elle elles encore entre est-ce " +
+  "faire fait jamais juste leurs mais même moins notre nous parce pendant peut plus pour pourquoi quand quelque sans sont sous " +
+  "tout toute toutes tous très trop vais votre vous about after again because before being could their there these thing think " +
+  "those would really right").split(" "));
+const normMot = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}_]/gu, "");
+const montageDe = (c) => ({ coupes: true, zooms: true, anim: true, accroche: true, barre: true, ...(c?.montage || {}) });
+let blocs = [], plans = [];
+
+function motsDuPassage(debut, fin) {
+  const mots = [];
+  for (const s of P.segments || []) {
+    if (s.end <= debut || s.start >= fin) continue;
+    if (s.words?.length) s.words.forEach((w) => { if (w.end > debut && w.start < fin) mots.push(w); });
+    else mots.push({ start: s.start, end: s.end, text: s.text });
+  }
+  return mots;
+}
+
+/* Passages gardés [[a, b]] en temps de la vidéo source (les blancs et les « euh » sautent). */
+function calculerBlocs(c) {
+  if (!montageDe(c).coupes || !P.segments) return [[c.debut, c.fin]];
+  const mots = motsDuPassage(c.debut, c.fin).filter((w) => !HESITATIONS.has(normMot(w.text)));
+  if (!mots.length) return [[c.debut, c.fin]];
+  const bl = []; let finMot = null;
+  for (const w of mots) {
+    if (bl.length && w.start - finMot <= TROU_MIN) bl[bl.length - 1][1] = Math.min(c.fin, w.end + MARGE);
+    else bl.push([Math.max(c.debut, w.start - MARGE), Math.min(c.fin, w.end + MARGE)]);
+    finMot = w.end;
+  }
+  const res = [];
+  for (let [a, b] of bl) {
+    a = c.debut + Math.floor((a - c.debut) * FPS) / FPS;
+    b = Math.min(c.fin, c.debut + Math.ceil((b - c.debut) * FPS) / FPS);
+    if (res.length && a <= res[res.length - 1][1]) res[res.length - 1][1] = Math.max(res[res.length - 1][1], b);
+    else if (b - a >= 0.2) res.push([a, b]);
+  }
+  return res.length ? res : [[c.debut, c.fin]];
+}
+const dureeMontee = (bl) => bl.reduce((s, [a, b]) => s + (b - a), 0);
+function versSortie(t, bl) {
+  let total = 0;
+  for (const [a, b] of bl) {
+    if (t < a) return total;
+    if (t <= b) return total + (t - a);
+    total += b - a;
+  }
+  return total;
+}
+function calculerPlans(bl, m) {
+  const res = []; let image = 0, k = 0;
+  for (const [a, b] of bl) {
+    const n = Math.round((b - a) * FPS);
+    for (const taille of n <= PLAN_MAX * FPS ? [n] : [Math.floor(n / 2), n - Math.floor(n / 2)]) {
+      res.push([image, image + taille, m.zooms ? CYCLE_ZOOMS[k % CYCLE_ZOOMS.length] : 1]);
+      image += taille; k++;
+    }
+  }
+  return res;
+}
+function zoomA(tSortie) {
+  const image = Math.floor(tSortie * FPS);
+  const p = plans.find(([a, b]) => image < b) || plans[plans.length - 1];
+  return p ? p[2] : 1;
+}
+function motCle(mots) {
+  let meilleur = -1, score = 0;
+  mots.forEach((w, i) => {
+    const n = normMot(w.text);
+    if (MOTS_VIDES.has(n) || n.length < 5) return;
+    const s = n.length + (/\d/.test(n) ? 3 : 0) + (w.text.endsWith("!") ? 2 : 0);
+    if (s > score) { meilleur = i; score = s; }
+  });
+  return meilleur;
+}
+function preparerMontage() {
+  const c = clip(); if (!c) { blocs = []; plans = []; return; }
+  blocs = calculerBlocs(c);
+  plans = calculerPlans(blocs, montageDe(c));
+}
+
+/* Accroche + barre + zoom, dessinés à chaque image de l'aperçu */
+function rendreHabillage(c, tSortie) {
+  const m = montageDe(c), echelle = ecran.clientHeight / 1920;
+  const z = m.zooms ? zoomA(tSortie) : 1;
+  $("#calque").style.transform = z !== 1 ? `scale(${z})` : "";
+  const acc = $("#accroche"), texte = ((c.texte?.contenu || "").trim() || c.titre || "").toLocaleUpperCase("fr-FR");
+  const voir = m.accroche && texte && tSortie < DUREE_ACCROCHE && !libre;
+  if (voir && acc.hidden) { acc.hidden = false; acc.style.animation = "none"; void acc.offsetWidth; acc.style.animation = ""; }
+  if (!voir) acc.hidden = true;
+  if (voir && acc.textContent !== texte) acc.textContent = texte;
+  if (voir) { acc.style.fontSize = `${96 * 0.92 * echelle}px`; acc.style.webkitTextStroke = `${18 * echelle}px #000`; }
+  const barre = $("#barre-prog");
+  barre.hidden = !m.barre;
+  if (m.barre) {
+    barre.style.height = `${14 * echelle}px`;
+    $("i", barre).style.width = `${Math.min(100, (tSortie / Math.max(dureeMontee(blocs), 0.1)) * 100)}%`;
+  }
+}
+
+/* Interrupteurs « Montage auto » */
+$("#r-montage").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-m]"); const c = clip(); if (!b || !c) return;
+  const cle = b.dataset.m, valeur = !montageDe(c)[cle];
+  c.montage = { ...montageDe(c), [cle]: valeur };
+  calculerSousTitres(); remplirReglages(c); majZone(); afficherClips(false);
+  planifierPatch({ montage: { [cle]: valeur } });
+});
+
 /* Sous-titres : même algorithme que montage.py */
 function calculerSousTitres() {
   const c = clip(); groupes = [];
+  preparerMontage();
   if (!c || !P.segments) return;
-  const mots = [];
-  for (const s of P.segments) {
-    if (s.end <= c.debut || s.start >= c.fin) continue;
-    if (s.words?.length) s.words.forEach((w) => { if (w.end > c.debut && w.start < c.fin) mots.push(w); });
-    else mots.push({ start: s.start, end: s.end, text: s.text });
-  }
+  const mots = motsDuPassage(c.debut, c.fin);
   const maxMots = c.style.mots;
   let g = [];
   for (const m of mots) {
@@ -510,9 +618,12 @@ function rendreSousTitre(t) {
     for (let k = 0; k < mots.length; k++) if (t >= (k === 0 ? groupes[i].debut : mots[k].start)) actif = k;
   }
   const fantome = i < 0 && video.paused;   // à l'arrêt, un repère reste visible pour pouvoir le déplacer
-  const cle = `${i}|${actif}|${JSON.stringify(s)}|${ecran.clientHeight}|${fantome}`;
+  const anim = montageDe(c).anim;
+  const cle = `${i}|${actif}|${JSON.stringify(s)}|${ecran.clientHeight}|${fantome}|${anim}`;
   if (cle === dernierRendu) return;
+  const nouveauGroupe = dernierRendu.split("|")[0] !== String(i);
   dernierRendu = cle;
+  if (anim && nouveauGroupe && i >= 0) { el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop"); }
   el.classList.toggle("fantome", fantome);
   el.style.top = `${s.position}%`;
   el.style.fontFamily = `"${s.police}", Arial, sans-serif`;
@@ -521,9 +632,11 @@ function rendreSousTitre(t) {
   el.style.webkitTextStroke = `${s.epaisseur * 2 * echelle}px ${s.contour}`;
   el.style.textShadow = `0 ${2 * echelle}px 0 rgba(0,0,0,.5)`;
   if (i < 0) { el.innerHTML = fantome ? `<span>${s.majuscules ? "SOUS-TITRES" : "Sous-titres"}</span>` : ""; return; }
+  const iCle = anim ? motCle(groupes[i].mots) : -1;
   el.innerHTML = groupes[i].mots.map((w, k) => {
     const txt = echap(s.majuscules ? w.text.toLocaleUpperCase("fr-FR") : w.text);
-    return `<span${s.surligne && k === actif ? ` style="color:${s.surligne}"` : ""}>${txt}</span>`;
+    if (s.surligne && s.surligne !== "aucun" && k === actif) return `<span style="color:${s.surligne}">${txt}</span>`;
+    return `<span${k === iCle ? ' class="cle"' : ""}>${txt}</span>`;
   }).join(" ");
 }
 
@@ -534,14 +647,22 @@ function boucle(now) {
   const c = clip();
   if (!c || $("#montage").hidden) return;
   let t = video.currentTime;
-  const finReelle = Number.isFinite(video.duration) ? Math.min(c.fin, video.duration) : c.fin;
+  const premier = blocs.length ? blocs[0][0] : c.debut;
+  const finClip = blocs.length ? blocs[blocs.length - 1][1] : c.fin;
+  const finReelle = Number.isFinite(video.duration) ? Math.min(finClip, video.duration) : finClip;
   if (!video.paused && !libre && !glisse && t >= finReelle - 0.02) {
-    if ($("#boucle").checked) { video.currentTime = c.debut; t = c.debut; }
-    else { video.pause(); video.currentTime = c.debut; t = c.debut; }
+    if ($("#boucle").checked) { video.currentTime = premier; t = premier; }
+    else { video.pause(); video.currentTime = premier; t = premier; }
+  } else if (!video.paused && !libre && !glisse && montageDe(c).coupes) {
+    // l'aperçu saute les blancs, comme le fera l'export
+    const suivant = blocs.find(([a, b]) => t < b);
+    if (suivant && t < suivant[0] - 0.04) { video.currentTime = suivant[0]; t = suivant[0]; }
   }
   if (libre && !video.paused && t >= c.debut && t < c.fin) libre = false;
   rendreSousTitre(t);
-  $("#t-actuel").textContent = fmt(t - c.debut);
+  const tSortie = versSortie(t, blocs);
+  rendreHabillage(c, tSortie);
+  $("#t-actuel").textContent = fmt(libre ? t - c.debut : tSortie);
   $("#tl-tete").style.left = `${pos(t)}%`;
   if (c.cadrage.mode === "flou" && now - dernierFond > 90 && video.readyState >= 2 && video.videoWidth) {
     dernierFond = now;
@@ -593,7 +714,12 @@ function majZone() {
   $$("#tl-mots i").forEach((i) => i.classList.toggle("dedans", +i.dataset.t >= c.debut && +i.dataset.t < c.fin));
   $("#t-debut").textContent = fmt(c.debut);
   $("#t-fin").textContent = fmt(c.fin);
-  $("#t-duree").textContent = fmt(c.fin - c.debut);
+  // durée du clip MONTÉ (blancs retirés) et passages coupés hachurés sur la timeline
+  const bl = calculerBlocs(c);
+  $("#t-duree").textContent = fmt(dureeMontee(bl));
+  let coupes = "";
+  for (let k = 0; k + 1 < bl.length; k++) coupes += `<i style="left:${pos(bl[k][1])}%;width:${pos(bl[k + 1][0]) - pos(bl[k][1])}%"></i>`;
+  $("#tl-coupes").innerHTML = coupes;
 }
 
 $("#tl-piste").addEventListener("pointerdown", (e) => {
@@ -682,6 +808,8 @@ function remplirReglages(c) {
   $("#ligne-decalage").hidden = cad.mode !== "remplir";
   if (actif !== $("#r-decalage")) $("#r-decalage").value = cad.decalage;
   $("#v-decalage").textContent = cad.decalage > 0 ? `+${cad.decalage}` : cad.decalage;
+  const mt = montageDe(c);
+  $$("#r-montage [data-m]").forEach((b) => b.setAttribute("aria-pressed", String(!!mt[b.dataset.m])));
   const tx = c.texte || {};
   $("#r-titre").setAttribute("aria-pressed", String(!!tx.titre));
   $("#r-partie").setAttribute("aria-pressed", String(!!tx.partie));
@@ -1058,12 +1186,17 @@ async function suivreIA() {
   if (e && e.etat === "telechargement") {
     pastille.hidden = false;
     pastille.innerHTML = `<span class="rec petit"></span> Téléchargement de la nouvelle IA… <b class="mono">${e.pct} %</b>`;
+  } else if (e && e.acceleration?.etat === "installation") {
+    pastille.hidden = false;
+    pastille.innerHTML = `<span class="rec petit"></span> ${echap(e.acceleration.message)}`;
   } else if (e && e.message) {
     pastille.hidden = false; pastille.textContent = e.message;
   } else if (e) {
     pastille.hidden = true;
   }
-  if (!e || e.etat === "verification" || e.etat === "telechargement") setTimeout(suivreIA, 1500);
+  if (!e || e.etat === "verification" || e.etat === "telechargement" || ["verification", "installation"].includes(e.acceleration?.etat)) {
+    setTimeout(suivreIA, 3000);
+  }
 }
 suivreIA();
 

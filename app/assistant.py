@@ -18,7 +18,8 @@ import requests
 
 import modele_ia
 from analyze import OLLAMA_URL, NUM_CTX
-from montage import STYLE_DEFAUT, CADRAGE_DEFAUT, TEXTE_DEFAUT, POLICES, mots_du_passage
+import montage as _montage
+from montage import STYLE_DEFAUT, CADRAGE_DEFAUT, TEXTE_DEFAUT, MONTAGE_DEFAUT, POLICES, mots_du_passage
 
 CE_QUE_JE_SAIS_FAIRE = (
     "Voilà ce que je sais faire :\n"
@@ -26,6 +27,7 @@ CE_QUE_JE_SAIS_FAIRE = (
     "• sous-titres : « en jaune », « plus gros », « en haut », « 2 mots à la fois », « karaoké en rose », « sans majuscules »\n"
     "• titre à l'écran : « mets le titre et le numéro de partie », « enlève le titre »\n"
     "• cadrage : « plein écran », « fond flou », « cadre plus à gauche »\n"
+    "• montage : « enlève les zooms », « garde les blancs », « sans barre », « sans accroche », « sous-titres sans animation »\n"
     "• titres : « trouve-moi un titre », « donne un titre à tous les clips », « renomme le clip en … »\n"
     "• « trouve-moi un passage drôle », « exporte », « annule »\n"
     "Ajoute « sur tous les clips » pour appliquer partout."
@@ -139,7 +141,9 @@ def appliquer(projet, clip, actions):
             elif typ == "duree":
                 s = float(a["secondes"])
                 avant_modif()
-                bornes(clip["debut"], clip["debut"] + s, recaler=True)
+                # avec la coupe des blancs, il faut prendre plus large pour garder la durée voulue
+                fin_visee = _montage.fin_pour_duree(segments, clip["debut"], s, clip.get("montage"), duree_video)
+                bornes(clip["debut"], fin_visee, recaler=True)
                 fait.append(f"durée réglée sur {s:g} s")
             elif typ == "sous_titres":
                 avant_modif()
@@ -176,6 +180,19 @@ def appliquer(projet, clip, actions):
                     c["decalage"] = max(-50, min(50, float(a["decalage"])))
                 clip["cadrage"] = c
                 fait.append("plein écran" if c["mode"] == "remplir" else "fond flouté")
+            elif typ == "montage":
+                avant_modif()
+                mt = {**MONTAGE_DEFAUT, **clip.get("montage", {})}
+                noms = {"coupes": "blancs coupés", "zooms": "zooms", "anim": "sous-titres animés",
+                        "accroche": "accroche", "barre": "barre de progression"}
+                for cle, nom in noms.items():
+                    if cle in a:
+                        mt[cle] = bool(a[cle])
+                        if cle == "coupes":
+                            fait.append("blancs coupés" if mt[cle] else "blancs gardés")
+                        else:
+                            fait.append(f"{nom} {'activé(e)' if mt[cle] else 'retiré(e)'}")
+                clip["montage"] = mt
             elif typ == "texte_ecran":
                 avant_modif()
                 tx = {**TEXTE_DEFAUT, **clip.get("texte", {})}
@@ -360,6 +377,25 @@ def lecture_rapide(message, historique=None):
         if "titre" in recent or "partie" in recent or "numero" in recent:
             actions.append({"type": "texte_ecran", "titre": "titre" in recent,
                             "partie": "partie" in recent or "numero" in recent})
+
+    # Montage automatique : blancs, zooms, animation, accroche, barre
+    mt = {}
+    non = r"(sans|enleve|retire|vire|supprime|pas d.?|plus d.?|stop|arrete|desactive|enlever)"
+    if re.search(r"(coupe|enleve|retire|supprime|vire)\w*.{0,15}(blancs?|silences?|pauses?|temps morts?)", t):
+        mt["coupes"] = True
+    if re.search(r"(garde|remets?|laisse|ne coupe pas|pas couper).{0,20}(blancs?|silences?|pauses?)", t):
+        mt["coupes"] = False
+    if re.search(r"zooms?\b", t):
+        mt["zooms"] = not re.search(non + r".{0,12}zooms?\b", t)
+    if re.search(r"\banim", t) and re.search(r"sous[- ]?titre|texte|mot|anim", t):
+        mt["anim"] = not re.search(non + r".{0,15}anim", t)
+    if re.search(r"accroche", t):
+        mt["accroche"] = not re.search(non + r".{0,12}accroche", t)
+    if re.search(r"\bbarre\b", t):
+        mt["barre"] = not re.search(non + r".{0,12}barre", t)
+    if mt:
+        actions = [x for x in actions if not (x["type"] == "cadrage" and "zoom" in t)]
+        actions.append({"type": "montage", **mt})
 
     # Placement : « espace-les », « rapproche-les », « monte le titre », « descends les sous-titres »
     sous = re.search(r"sous[- ]?titres?|texte|ecrit", t)

@@ -515,4 +515,20 @@ button:disabled { cursor: not-allowed; }.ou { display: flex; align-items: center
 .plage em { font-style: normal; color: var(--tres-doux); }
 .plage label { display: flex; align-items: center; gap: 6px; }
 .plage input { width: 84px; background: var(--nuit); border: 1px solid var(--trait); border-radius: 8px; padding: 6px 8px; outline: none; font: 13px var(--mono); }
-.plage input:focus { border-color: var(--rec); }
+.plage input:focus { border-color: var(--rec); }/* ---------- montage automatique (aperçu) ---------- */
+.calque { position: absolute; inset: 0; transform-origin: 50% 42%; will-change: transform; }
+.soustitre.pop { animation: rebond .11s ease-out; }
+@keyframes rebond { from { transform: translateY(-50%) scale(1.18); } to { transform: translateY(-50%) scale(1); } }
+.soustitre .cle { color: #FFE14D; }
+.accroche {
+  position: absolute; left: 6.5%; right: 6.5%; top: 40%; transform: translateY(-50%); z-index: 2; pointer-events: none;
+  text-align: center; font-family: "Arial Black", Arial, sans-serif; font-weight: 900; color: #fff; line-height: 1.1;
+  paint-order: stroke fill; text-shadow: 0 4px 0 rgba(0, 0, 0, .55); animation: accroche .26s ease-out both;
+}
+@keyframes accroche { 0% { transform: translateY(-50%) scale(.7); } 60% { transform: translateY(-50%) scale(1.06); } 100% { transform: translateY(-50%) scale(1); } }
+.barre-prog { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(255, 255, 255, .3); z-index: 2; pointer-events: none; }
+.barre-prog i { display: block; height: 100%; width: 0; background: #ff4d2e; }
+.bascules-montage { display: flex; flex-wrap: wrap; gap: 6px; }
+.bascules-montage .bascule { margin: 0; }
+.tl-coupes { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.tl-coupes i { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, rgba(10, 9, 8, .75) 0 4px, rgba(10, 9, 8, .35) 4px 8px); }
