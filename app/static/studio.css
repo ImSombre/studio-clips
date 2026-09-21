@@ -235,7 +235,9 @@ textarea::placeholder { color: var(--tres-doux); }
 }
 .ia-etat b { color: var(--rec); }
 .titre-ecran {
-  position: absolute; left: 8.33%; right: 8.33%; text-align: center; pointer-events: none;
+  /* pas de pointer-events:none ici : cette règle vient APRÈS celle qui rend le titre attrapable
+     à la souris (plus haut) et l'annulait — le titre ne pouvait plus être déplacé. */
+  position: absolute; left: 8.33%; right: 8.33%; text-align: center;
   font-family: "Arial Black", Arial, sans-serif; font-weight: 900; line-height: 1.22; color: #fff;
 }
 .titre-ecran .te-bloc {
