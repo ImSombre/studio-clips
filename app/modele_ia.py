@@ -132,6 +132,15 @@ def preparer():
 def attendre_pret(pendant=None):
     """Bloque tant que le téléchargement tourne (appelé par l'analyse d'une vidéo).
     La simple vérification ne peut pas bloquer plus de 2 minutes : on utilise alors ce qui est installé."""
+    if etat["etat"] in ("verification", "erreur"):
+        # un modèle est déjà installé ? alors rien à attendre : on s'en sert tout de suite
+        try:
+            presents = installes()
+        except Exception:  # noqa: BLE001 — Ollama ne répond pas encore : on attend comme avant
+            presents = set()
+        choisi = _choisir_parmi(presents) if presents else None
+        if choisi:
+            etat.update(modele=choisi, etat="pret", pct=100, message="")
     attente_verif = 0
     while etat["etat"] == "telechargement" or (etat["etat"] in ("verification", "erreur") and attente_verif < 180):
         if pendant:

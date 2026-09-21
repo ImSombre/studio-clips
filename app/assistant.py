@@ -658,14 +658,55 @@ NOMS_LANGUES = {"fr": "français", "en": "anglais", "es": "espagnol", "ar": "ara
                 "pl": "polonais", "ro": "roumain", "ja": "japonais", "zh": "chinois", "ko": "coréen"}
 
 
+OUVERTURES = re.compile(r"^(alors|donc|bon|bah|ben|euh|voila|voilà|du coup|en fait|bref|salut|bonjour|"
+                        r"bienvenue|aujourd.hui|je vais|on va|comme je|tu sais|vous savez)\b", re.I)
+
+
+def _note_phrase(phrase):
+    """À quel point une phrase ferait un bon titre : chiffres, mots forts, question… (plus c'est haut, mieux c'est)."""
+    mots = [m for m in phrase.split() if m]
+    if not 4 <= len(mots) <= 40:
+        return -1
+    note = 0.0
+    note += 2.5 if any(c.isdigit() for c in phrase) else 0            # « six prélèvements », « mille euros »
+    note += 1.5 if phrase.rstrip().endswith(("?", "!")) else 0        # une question accroche
+    note += sum(1 for m in mots if len(_montage._norm(m)) >= 7) * 0.5          # mots concrets plutôt que du remplissage
+    note -= sum(1 for m in mots if _montage._norm(m) in _montage.MOTS_VIDES) * 0.4
+    note -= 3 if OUVERTURES.match(phrase.strip()) else 0              # « alors donc voilà… » : du vide
+    return note
+
+
 def _titre_secours(texte_clip):
-    """Sans IA : la première phrase du clip, raccourcie."""
-    phrases = [p for p in re.split(r"(?<=[.?!])\s", texte_clip.strip()) if p.strip()] or ["Extrait"]
-    # la 1ʳᵉ vraie phrase (le clip commence souvent en plein milieu d'une phrase)
-    phrase = next((p for p in phrases if len(p.split()) >= 4), phrases[0])
+    """Sans IA : la phrase la PLUS PARLANTE du clip (pas la première, qui n'est que du bla-bla d'intro)."""
+    phrases = [p.strip() for p in re.split(r"(?<=[.?!])\s", texte_clip.strip()) if p.strip()] or ["Extrait"]
+    phrase = max(phrases, key=_note_phrase)
+    if _note_phrase(phrase) < 0:
+        phrase = next((p for p in phrases if len(p.split()) >= 4), phrases[0])
     mots = phrase.split()
     titre = " ".join(mots[:7]).rstrip(",;:.") + ("…" if len(mots) > 7 else "")
     return titre[:1].upper() + titre[1:]
+
+
+def note_titre(titre):
+    """À quel point un titre donne envie de cliquer : un chiffre, une bonne longueur, pas de « … »."""
+    mots = (titre or "").split()
+    note = 0.0
+    note += 2 if any(c.isdigit() for c in titre or "") else 0
+    note += 1 if 3 <= len(mots) <= 8 else -1
+    note += 1 if 15 <= len(titre or "") <= 55 else 0
+    note += 0.5 if (titre or "").rstrip().endswith(("?", "!")) else 0
+    note -= 1.5 if (titre or "").rstrip().endswith(("…", "...")) else 0   # phrase coupée = recopie de la parole
+    return note
+
+
+def titre_faible(titre, texte_clip):
+    """Vrai si le titre ne fait que recopier le début du clip (ou ne dit rien) : il faudra le refaire."""
+    t, texte = _montage._norm(titre or ""), _montage._norm(texte_clip or "")
+    if not t or t in ("extrait", "clip"):
+        return True
+    if len(titre) > 90:
+        return True
+    return bool(texte) and texte.startswith(t[:max(12, int(len(t) * 0.8))])
 
 
 def proposer_titres(projet, clip, n=3):
@@ -693,8 +734,8 @@ def proposer_titres(projet, clip, n=3):
     propres = []
     for t in titres if isinstance(titres, list) else []:
         t = re.sub(r"#\w+", "", str(t)).strip(" \"«»'").strip()
-        if 2 <= len(t) <= 80 and t.lower() not in (x.lower() for x in propres):
-            propres.append(t)
+        if 2 <= len(t) <= 80 and t.lower() not in (x.lower() for x in propres) and not titre_faible(t, texte_clip):
+            propres.append(t)   # un titre qui recopie les premières paroles ne sert à rien
     return propres[:n] or [_titre_secours(texte_clip)]
 
 

@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.6"
+VERSION = "3.7"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -307,6 +307,35 @@ def _decoupage_de_secours(p, bornes):
     return clips
 
 
+def _titres_corrects(p, clips, job=None, pct=(0, 100)):
+    """Un titre qui recopie les premières paroles (ou « Extrait ») ne donne envie de rien :
+    on en redemande un vrai à l'IA, qui lit tout le passage."""
+    a_refaire = []
+    for c in clips:
+        texte = " ".join(w["text"] for w in montage.mots_du_passage(p.get("segments", []), c["debut"], c["fin"]))
+        if assistant.titre_faible(c.get("titre"), texte):
+            a_refaire.append(c)
+    for i, c in enumerate(a_refaire):
+        if job is not None:
+            _surveiller(job)
+            job["etape"] = f"Titre du clip {i + 1}/{len(a_refaire)}"
+            job["pct"] = int(pct[0] + (pct[1] - pct[0]) * i / max(len(a_refaire), 1))
+        try:
+            # on en demande 3 et on garde le plus parlant (un chiffre, ni trop court ni trop long)
+            propositions = assistant.proposer_titres(p, c, n=3)
+            titre = max(propositions, key=assistant.note_titre)[:80]
+        except Exception:  # noqa: BLE001 — IA indisponible : on garde le titre existant
+            traceback.print_exc()
+            continue
+        with verrou:
+            if c in p["clips"]:
+                c["titre"] = titre
+    if a_refaire:
+        with verrou:
+            sauver(p)
+    return len(a_refaire)
+
+
 def _assurer_vision(pid, job=None, pct=(0, 100)):
     """Regarde l'image des clips (visages, infos affichées à l'écran) si ce n'est pas déjà fait.
     Jamais bloquant : si ça rate, le clip garde simplement le cadrage par défaut."""
@@ -446,9 +475,11 @@ def job_analyse(pid):
                 with verrou:
                     p["clips"] = [nouveau_clip(c, p["segments"]) for c in trouves]
                     sauver(p)
+                modele_ia.attendre_pret()
+                _titres_corrects(p, list(p["clips"]), job, (88, 92))
                 # Cadrage intelligent : où sont le visage et les infos affichées (article, capture…)
                 job["etape"], job["message"] = "L'IA regarde l'image (visages, infos à l'écran)", ""
-                _assurer_vision(pid, job, (88, 99))
+                _assurer_vision(pid, job, (92, 99))
                 with verrou:
                     p["etat"] = "pret"
                     if p["clips"] and secours:
@@ -510,8 +541,12 @@ def job_nouveau_clip(pid, consigne):
                 c = nouveau_clip(libres[0], p["segments"])
                 p["clips"] = sorted(p["clips"] + [c], key=lambda x: x["debut"])
                 job["resultat"] = c["id"]
-                dire(p, f"Trouvé : « {c['titre']} » (note {c['note']:.0f}/10). {c['raison']}".strip(), c["id"])
             sauver(p)
+        if libres:
+            _titres_corrects(p, [c], job, (90, 94))
+            with verrou:
+                dire(p, f"Trouvé : « {c['titre']} » (note {c['note']:.0f}/10). {c['raison']}".strip(), c["id"])
+                sauver(p)
         job["etape"] = "L'IA regarde l'image"
         with verrou_lourd:
             _assurer_vision(pid, job, (95, 99))
