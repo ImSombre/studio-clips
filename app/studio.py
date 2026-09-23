@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "4.1"
+VERSION = "4.2"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -392,6 +392,28 @@ def _titres_corrects(p, clips, job=None, pct=(0, 100)):
     return len(a_refaire)
 
 
+def _accroches(p, clips, job=None, pct=(0, 100), refaire=False):
+    """Une phrase d'accroche par clip (différente du titre), écrite par l'IA d'après ce qui y est dit."""
+    a_faire = [c for c in clips if refaire or not (c.get("accroche") or "").strip()]
+    for i, c in enumerate(a_faire):
+        if job is not None:
+            _surveiller(job)
+            job["etape"] = f"Accroche du clip {i + 1}/{len(a_faire)}"
+            job["pct"] = int(pct[0] + (pct[1] - pct[0]) * i / max(len(a_faire), 1))
+        try:
+            accroche = assistant.proposer_accroche(p, c)
+        except Exception:  # noqa: BLE001 — sans accroche, c'est le titre qui s'affiche
+            traceback.print_exc()
+            continue
+        if accroche:
+            with verrou:
+                if c in p["clips"]:
+                    c["accroche"] = accroche
+    if a_faire:
+        with verrou:
+            sauver(p)
+
+
 def _assurer_vision(pid, job=None, pct=(0, 100)):
     """Regarde l'image des clips (visages, infos affichées à l'écran) si ce n'est pas déjà fait.
     Jamais bloquant : si ça rate, le clip garde simplement le cadrage par défaut."""
@@ -570,7 +592,8 @@ def job_analyse(pid):
                     p["clips"] = [nouveau_clip(c, p["segments"]) for c in trouves]
                     sauver(p)
                 modele_ia.attendre_pret()
-                _titres_corrects(p, list(p["clips"]), job, (88, 92))
+                _titres_corrects(p, list(p["clips"]), job, (88, 90))
+                _accroches(p, list(p["clips"]), job, (90, 92))
                 # Cadrage intelligent : où sont le visage et les infos affichées (article, capture…)
                 job["etape"], job["message"] = "L'IA regarde l'image (visages, infos à l'écran)", ""
                 _assurer_vision(pid, job, (92, 99))
@@ -637,7 +660,8 @@ def job_nouveau_clip(pid, consigne):
                 job["resultat"] = c["id"]
             sauver(p)
         if libres:
-            _titres_corrects(p, [c], job, (90, 94))
+            _titres_corrects(p, [c], job, (90, 92))
+            _accroches(p, [c], job, (92, 94))
             with verrou:
                 dire(p, f"Trouvé : « {c['titre']} » (note {c['note']:.0f}/10). {c['raison']}".strip(), c["id"])
                 sauver(p)
@@ -722,6 +746,8 @@ def job_titrer_tous(pid):
                 c["titre"] = titre[:80]
                 c["exporte"] = None
                 sauver(p)
+            job["etape"] = f"Accroche du clip {i}/{len(a_titrer)}"
+            _accroches(p, [c], refaire=True)   # nouveau titre : l'accroche doit rester différente
         with verrou:
             dire(p, f"C'est fait : {len(a_titrer)} clip(s) ont un nouveau titre tiré de leur contenu. "
                     "Tu peux en changer un avec ✨ Idées de titre, ou annuler clip par clip.")
@@ -733,7 +759,8 @@ NOMS_RESERVES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(
 
 
 def _empreinte(c):
-    return json.dumps([c.get(k) for k in ("debut", "fin", "passages", "style", "cadrage", "texte", "titre", "montage")],
+    return json.dumps([c.get(k) for k in ("debut", "fin", "passages", "style", "cadrage", "texte", "titre", "montage",
+                                          "accroche")],
                       sort_keys=True)
 
 
@@ -834,6 +861,39 @@ def _choisir_fichier(titre):
 @app.post("/api/choisir")
 def choisir_video():
     return jsonify({"chemin": _choisir_fichier("Choisis ta vidéo")})
+
+
+_niveaux_musique = {}
+
+
+@app.get("/api/projets/<pid>/clips/<cid>/musique")
+def musique_du_clip(pid, cid):
+    """Le fichier de musique du clip, pour l'entendre dans l'aperçu (seulement celui choisi pour CE clip)."""
+    c = clip_de(charger(pid), cid)
+    chemin = ((c.get("montage") or {}).get("musique") or "").strip()
+    if not chemin or not os.path.isfile(chemin):
+        abort(404)
+    return send_file(chemin, conditional=True, max_age=0)
+
+
+@app.get("/api/projets/<pid>/clips/<cid>/musique/niveau")
+def niveau_musique(pid, cid):
+    """Volume réel de la musique (LUFS), mesuré une fois : l'aperçu la joue au même niveau que l'export."""
+    c = clip_de(charger(pid), cid)
+    chemin = ((c.get("montage") or {}).get("musique") or "").strip()
+    if not chemin or not os.path.isfile(chemin):
+        abort(404)
+    cle = (chemin, os.path.getmtime(chemin))
+    if cle not in _niveaux_musique:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-t", "90", "-i", chemin, "-vn",
+                            "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WIN)
+        blocs = re.findall(r'\{[^{}]*"input_i"[^{}]*\}', r.stderr, re.S)
+        try:
+            _niveaux_musique[cle] = float(json.loads(blocs[-1])["input_i"]) if blocs else -20.0
+        except (ValueError, KeyError):
+            _niveaux_musique[cle] = -20.0
+    return jsonify({"lufs": _niveaux_musique[cle]})
 
 
 @app.post("/api/musique")
@@ -1031,6 +1091,9 @@ def modifier_clip(pid, cid):
             actions.append({"type": "montage", **d["montage"]})
         if d.get("titre"):
             actions.append({"type": "titre", "texte": d["titre"]})
+        if "accroche" in d:
+            assistant.memoriser(c)
+            c["accroche"] = str(d.get("accroche") or "").strip()[:60]
         historique_avant = len(c.get("historique", []))
         assistant.appliquer(p, c, actions)
         if _empreinte(c) == avant:

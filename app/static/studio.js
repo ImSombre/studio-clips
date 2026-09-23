@@ -515,7 +515,7 @@ const MOTS_VIDES = new Set(("alors aussi avait avant avec cette comme comment da
   "those would really right").split(" "));
 const normMot = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}_]/gu, "");
 const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, transitions: true,
-  musique: "", musique_volume: 0.35, ...(c?.montage || {}) });
+  musique: "", musique_volume: 0.35, voix_propre: false, ...(c?.montage || {}) });
 const FONDU = 0.25;   // fondu entre deux morceaux assemblés (même valeur que montage.py)
 /* Un clip peut assembler PLUSIEURS morceaux de la vidéo. Un seul, par défaut. */
 const passagesDe = (c) => (c?.passages?.length ? c.passages : [[c.debut, c.fin]]).map(([a, b]) => [+a, +b]);
@@ -623,7 +623,8 @@ function rendreHabillage(c, tSortie) {
   const m = montageDe(c), echelle = ecran.clientHeight / 1920;
   const z = m.zooms && !c.cadrages?.length ? zoomA(tSortie) : 1;   // avec un plan de cadrage, les zooms y sont déjà
   $("#calque").style.transform = z !== 1 ? `scale(${z})` : "";
-  const acc = $("#accroche"), texte = ((c.texte?.contenu || "").trim() || c.titre || "").toLocaleUpperCase("fr-FR");
+  const acc = $("#accroche"), texte = ((c.accroche || "").trim() || (c.texte?.contenu || "").trim() || c.titre || "")
+    .toLocaleUpperCase("fr-FR");
   const voir = m.accroche && texte && tSortie < DUREE_ACCROCHE && !libre;
   if (voir && acc.hidden) { acc.hidden = false; acc.style.animation = "none"; void acc.offsetWidth; acc.style.animation = ""; }
   if (!voir) acc.hidden = true;
@@ -635,6 +636,54 @@ function rendreHabillage(c, tSortie) {
     barre.style.height = `${14 * echelle}px`;
     $("i", barre).style.width = `${Math.min(100, (tSortie / Math.max(dureeMontee(blocs), 0.1)) * 100)}%`;
   }
+}
+
+/* =================== musique dans l'aperçu : même niveau et même baisse sous la voix qu'à l'export =================== */
+const musiqueApercu = { audio: new Audio(), ctx: null, gain: null, cle: "", lufs: null };
+musiqueApercu.audio.loop = true;
+musiqueApercu.audio.preload = "auto";
+function brancherMusique() {
+  if (musiqueApercu.ctx) return;
+  try {   // WebAudio : permet de monter le son au-delà de 100 % si le morceau est très doux
+    musiqueApercu.ctx = new AudioContext();
+    musiqueApercu.gain = musiqueApercu.ctx.createGain();
+    musiqueApercu.ctx.createMediaElementSource(musiqueApercu.audio).connect(musiqueApercu.gain);
+    musiqueApercu.gain.connect(musiqueApercu.ctx.destination);
+  } catch (_) { musiqueApercu.ctx = null; }
+}
+async function preparerMusique(c) {
+  const mt = montageDe(c);
+  const cle = mt.musique ? `${P.id}|${c.id}|${mt.musique}` : "";
+  if (cle === musiqueApercu.cle) return;
+  musiqueApercu.cle = cle; musiqueApercu.lufs = null;
+  musiqueApercu.audio.pause();
+  if (!cle) { musiqueApercu.audio.removeAttribute("src"); return; }
+  musiqueApercu.audio.src = `/api/projets/${P.id}/clips/${c.id}/musique?v=${encodeURIComponent(mt.musique)}`;
+  try { musiqueApercu.lufs = (await api(`/api/projets/${P.id}/clips/${c.id}/musique/niveau`)).lufs; } catch (_) { musiqueApercu.lufs = -20; }
+}
+const parle = (t) => groupes.some((g) => t >= g.debut - 0.05 && t < g.fin + 0.2);
+/* Même calcul que montage.py : musique ramenée à -38..-22 LUFS, baissée de ~12 dB quand ça parle, fondu final */
+function gainMusique(volume, lufs, enParole, tSortie, total) {
+  const cible = -38 + 16 * Math.max(0, Math.min(1, volume ?? 0.35));
+  const db = cible - (lufs ?? -20) - (enParole ? 12 : 0);
+  const fondu = total - tSortie < 1.2 ? Math.max(0, (total - tSortie) / 1.2) : 1;
+  return Math.min(8, Math.pow(10, db / 20)) * fondu;
+}
+function majMusique(c, t, tSortie) {
+  const mt = montageDe(c), a = musiqueApercu.audio;
+  if (!mt.musique || !a.src) { if (!a.paused) a.pause(); return; }
+  if (video.paused || libre || glisse) { if (!a.paused) a.pause(); return; }
+  brancherMusique();
+  if (musiqueApercu.ctx?.state === "suspended") musiqueApercu.ctx.resume();
+  const d = a.duration || 0;
+  if (d > 0) {
+    const attendu = tSortie % d;
+    if (Math.abs(a.currentTime - attendu) > 0.35) a.currentTime = attendu;
+  }
+  if (a.paused) a.play().catch(() => {});
+  const g = gainMusique(mt.musique_volume, musiqueApercu.lufs, parle(t), tSortie, dureeMontee(blocs));
+  if (musiqueApercu.gain) musiqueApercu.gain.gain.setTargetAtTime(g, musiqueApercu.ctx.currentTime, 0.08);
+  else a.volume = Math.max(0, Math.min(1, g));
 }
 
 /* Musique de fond : le fichier est choisi par l'utilisateur (rien n'est téléchargé) */
@@ -649,6 +698,12 @@ $("#r-musique").addEventListener("click", () => uneFois("musique", async () => {
   if (r?.chemin) { changerMontage({ musique: r.chemin }); toast("Musique ajoutée — elle baisse toute seule quand ça parle"); }
 }));
 $("#r-musique-off").addEventListener("click", () => changerMontage({ musique: "" }));
+$("#r-accroche").addEventListener("change", (e) => {
+  const c = clip(); if (!c) return;
+  c.accroche = e.target.value.trim();
+  planifierPatch({ accroche: c.accroche }, 0);
+});
+$("#r-accroche").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
 $("#r-musique-vol").addEventListener("input", (e) => changerMontage({ musique_volume: +e.target.value / 100 }));
 
 /* Interrupteurs « Montage auto » */
@@ -800,7 +855,10 @@ let dernierFond = 0;
 function boucle(now) {
   requestAnimationFrame(boucle);
   const c = clip();
-  if (!c || $("#montage").hidden) return;
+  if (!c || $("#montage").hidden) {   // on quitte le clip : la musique de l'aperçu s'arrête aussi
+    if (!musiqueApercu.audio.paused) musiqueApercu.audio.pause();
+    return;
+  }
   let t = video.currentTime;
   const premier = blocs.length ? blocs[0][0] : c.debut;
   const finClip = blocs.length ? blocs[blocs.length - 1][1] : c.fin;
@@ -819,6 +877,8 @@ function boucle(now) {
   rendreHabillage(c, tSortie);
   const plan = rendreCadrage(c, t);
   if (plan) rendreFondu(c, t);
+  preparerMusique(c);
+  majMusique(c, t, tSortie);
   if (!deplace) placerTextesSelonPlan(c, plan);
   $("#t-actuel").textContent = fmt(libre ? t - c.debut : tSortie);
   $("#tl-tete").style.left = `${pos(t)}%`;
@@ -1041,6 +1101,9 @@ function remplirReglages(c) {
   $("#v-decalage").textContent = cad.decalage > 0 ? `+${cad.decalage}` : cad.decalage;
   const mt = montageDe(c);
   $$("#r-montage [data-m]").forEach((b) => b.setAttribute("aria-pressed", String(!!mt[b.dataset.m])));
+  $("#ligne-accroche").hidden = !mt.accroche;
+  if (actif !== $("#r-accroche")) $("#r-accroche").value = c.accroche || "";
+  $("#r-accroche").placeholder = `(${c.titre})`;
   const musique = (mt.musique || "").trim();
   $("#nom-musique").textContent = musique ? musique.split(/[\\/]/).pop() : "";
   $("#r-musique-off").hidden = !musique;

@@ -146,7 +146,13 @@ LANGUES_SANS_ESPACES = ("zh", "ja", "ko", "th", "yue", "lo", "my")
 # coupes = retirer les blancs : désactivé par défaut (sur un passage continu, ça hache pour rien)
 MONTAGE_DEFAUT = {"coupes": False, "zooms": True, "anim": True, "accroche": True, "barre": True,
                   "transitions": True,   # fondu entre deux passages assemblés
-                  "musique": "", "musique_volume": 0.35}   # musique de fond choisie par l'utilisateur
+                  "musique": "", "musique_volume": 0.35,   # musique de fond choisie par l'utilisateur
+                  "voix_propre": False}   # réduit le souffle et les bruits de fond (option : à essayer par vidéo)
+# Nettoyage de la voix : coupe les grondements (<80 Hz), réduit le bruit de fond constant (souffle, ventilo),
+# puis ferme doucement le son dans les pauses. Mesuré sur une voix + souffle rose : le souffle des pauses passe
+# de -44 à -74 dB, la voix ne bouge pas (-19,9 dB). Sans la « porte », le débruiteur seul ne gagne que ~6 dB.
+NETTOYAGE_VOIX = "highpass=f=80,afftdn=nr=24:nf=-40:tn=1,agate=threshold=0.02:ratio=3:attack=5:release=250"
+CIBLE_SON = "I=-14:TP=-1.5:LRA=11"   # niveau TikTok
 FONDU = 0.25             # durée du fondu image (s) ; le son a le sien, plus court
 FPS = 30
 TROU_MIN = 0.45          # silence (s) à partir duquel on coupe
@@ -575,7 +581,9 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
         titre_ass = ligne_titre(texte, clip.get("titre"), clip.get("numero"), duree_sortie, tranches_ti)
         accroche = None
         if montage["accroche"]:
-            accroche = ((texte.get("contenu") or "").strip() or clip.get("titre") or "", min(2.5, duree_sortie))
+            # l'accroche écrite pour ce clip ; à défaut, le titre
+            accroche = ((clip.get("accroche") or "").strip() or (texte.get("contenu") or "").strip()
+                        or clip.get("titre") or "", min(2.5, duree_sortie))
         ecrire_ass(groupes, style, os.path.join(dossier_tmp, "subs.ass"), titre_ass, texte["taille"],
                    clip.get("langue", "fr"), anim=montage["anim"], accroche=accroche if accroche and accroche[0] else None,
                    barre_duree=duree_sortie if montage["barre"] else None, tranches=tranches_st)
@@ -590,15 +598,28 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
             filtre_son = (f"[1:a]aloop=loop=-1:size=2000000000,atrim=0:{duree_sortie:.3f},asetpts=PTS-STARTPTS,"
                           f"loudnorm=I={cible:.0f}:TP=-3:LRA=7,"
                           f"afade=t=out:st={max(0, duree_sortie - 1.2):.3f}:d=1.2[mus];"
-                          "[0:a]asplit=2[voix1][voix2];"
+                          f"[0:a]{NETTOYAGE_VOIX + ',' if montage.get('voix_propre') else ''}asplit=2[voix1][voix2];"
                           "[mus][voix2]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[musb];"
-                          "[voix1][musb]amix=inputs=2:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+                          "[voix1][musb]amix=inputs=2:normalize=0,{NIVEAU}[a]")
+        nettoyage = NETTOYAGE_VOIX + "," if montage.get("voix_propre") else ""
+        entrees = ["-f", "concat", "-safe", "0", "-i", "liste.txt", *(["-i", os.path.abspath(musique)] if musique else [])]
+        # Le niveau est d'abord MESURÉ, puis appliqué en gain constant. En une seule passe, loudnorm
+        # remonte le son pendant les pauses : le souffle de la pièce ressort presque aussi fort que la voix.
+        niveau = f"loudnorm={CIBLE_SON}"
+        if avec_son:
+            mesure = _mesurer_niveau(entrees, filtre_son.replace("{NIVEAU}", niveau + ":print_format=json")
+                                     if musique else None, nettoyage + niveau + ":print_format=json", dossier_tmp)
+            if mesure:
+                niveau = (f"loudnorm={CIBLE_SON}:measured_I={mesure['input_i']}:measured_TP={mesure['input_tp']}"
+                          f":measured_LRA={mesure['input_lra']}:measured_thresh={mesure['input_thresh']}"
+                          f":offset={mesure['target_offset']}:linear=true")
 
         provisoire = os.path.splitext(os.path.abspath(sortie))[0] + ".encodage.mp4"
         try:
-            son = (["-filter_complex", filtre_son, "-map", "0:v", "-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
+            son = (["-filter_complex", filtre_son.replace("{NIVEAU}", niveau), "-map", "0:v", "-map", "[a]",
+                    "-c:a", "aac", "-b:a", "160k"]
                    if musique else
-                   ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "160k"] if avec_son else ["-an"])
+                   ["-af", nettoyage + niveau, "-c:a", "aac", "-b:a", "160k"] if avec_son else ["-an"])
             _ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "liste.txt",
                      *(["-i", os.path.abspath(musique)] if musique else []),
                      "-vf", "ass=subs.ass",
@@ -618,6 +639,26 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
         progression(100)
     finally:
         shutil.rmtree(dossier_tmp, ignore_errors=True)
+
+
+def _mesurer_niveau(entrees, filtre_complexe, filtre_simple, dossier):
+    """1re passe (son seul, rapide) : mesure le niveau du clip pour appliquer ensuite un gain constant."""
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", *entrees, "-vn"]
+    cmd += (["-filter_complex", filtre_complexe, "-map", "[a]"] if filtre_complexe else ["-af", filtre_simple])
+    try:
+        r = subprocess.run(cmd + ["-f", "null", "-"], cwd=dossier, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        blocs = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr, re.S)
+        if not blocs:
+            return None
+        import json as _json
+        d = _json.loads(blocs[-1])
+        if any(str(d.get(k, "")).strip() in ("", "-inf", "inf") for k in ("input_i", "input_tp", "input_thresh")):
+            return None   # clip muet : rien à mesurer, on garde le réglage simple
+        return d
+    except (OSError, ValueError):
+        return None
 
 
 def couverture(clip_mp4, instant=1.2):

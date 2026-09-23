@@ -295,7 +295,8 @@ def appliquer(projet, clip, actions):
                     mt["musique_volume"] = max(0.02, min(1.0, float(a["musique_volume"])))
                     fait.append(f"musique à {round(mt['musique_volume'] * 100)} %")
                 noms = {"coupes": "blancs coupés", "zooms": "zooms", "anim": "sous-titres animés",
-                        "accroche": "accroche", "barre": "barre de progression", "transitions": "fondus"}
+                        "accroche": "accroche", "barre": "barre de progression", "transitions": "fondus",
+                        "voix_propre": "voix nettoyée"}
                 for cle, nom in noms.items():
                     if cle in a:
                         mt[cle] = bool(a[cle])
@@ -347,6 +348,10 @@ def appliquer(projet, clip, actions):
                 speciales.append("annuler")
             elif typ == "exporter":
                 speciales.append("exporter")
+            elif typ == "accroche" and str(a.get("texte", "")).strip():
+                avant_modif()
+                clip["accroche"] = str(a["texte"]).strip()[:60]
+                fait.append(f"accroche : « {clip['accroche']} »")
             elif typ == "corriger_mot":
                 de, par = str(a.get("de", "")).strip(), str(a.get("par", "")).strip()
                 if de and par:
@@ -386,6 +391,12 @@ def lecture_rapide(message, historique=None):
         return [{"type": "exporter"}]
     if re.search(r"\b(un autre|nouveau|nouvel|trouve[- ]moi|cherche[- ]moi|cherche)\s+(\w+\s+){0,3}?(clip|passage|extrait|moment)", t):
         return [{"type": "nouveau_clip", "consigne": message}]
+
+    # « change l'accroche en … », « mets comme accroche … »
+    m = re.search(r"(?:change|mets?|remplace|modifie)\s+(?:l['’]\s*accroche|comme accroche)\s*(?:en|par|:)?\s*"
+                  r"[\"«'“]?\s*(.+?)\s*[\"»'”]?\s*$", message.strip(), re.I)
+    if m and 1 < len(m.group(1)) <= 60:
+        actions.append({"type": "accroche", "texte": m.group(1)})
 
     # « il a écrit Ziggy au lieu de Zigi », « corrige "Ziggy" en "Zigi" », « remplace le mot Ziggy par Zigi »
     brut_msg = message.strip()
@@ -541,6 +552,11 @@ def lecture_rapide(message, historique=None):
         mt["barre"] = not re.search(non + r".{0,12}barre", t)
     if re.search(r"transition|fondus?\b", t):
         mt["transitions"] = not re.search(non + r".{0,14}(transition|fondus?)", t)
+    if re.search(r"(nettoie|nettoyer|nettoyage|debruit|enleve|retire|vire|reduis|reduire)\w*.{0,20}(bruit|souffle|voix)|"
+                 r"voix (propre|nette|claire)", t):
+        mt["voix_propre"] = not re.search(r"(sans|pas de|plus de|desactive|arrete)\w*.{0,12}(nettoyage|voix nette)", t)
+    if re.search(r"(garde|remets?|laisse)\w*.{0,12}(le )?(bruit|son d.?origine)|voix d.?origine", t):
+        mt["voix_propre"] = False
     if re.search(r"musique|son de fond|fond sonore", t):
         if re.search(non + r".{0,14}(musique|son de fond|fond sonore)", t):
             mt["musique"] = ""          # « enlève la musique »
@@ -635,6 +651,7 @@ Actions possibles (mets une liste vide s'il n'y a rien à modifier) :
 {"type":"ajouter_passage","debut":190,"fin":220}  AJOUTE un 2e morceau de la video AU MEME clip (temps en secondes)
 {"type":"retirer_passage","index":1}      enleve le 2e morceau assemble (index 0 = le premier)
 {"type":"assembler"}                      fabrique un clip qui assemble les MEILLEURS moments de toute la video
+{"type":"accroche","texte":"Il a tout perdu en 1 nuit"}  change la phrase en gros des 2,5 premieres secondes
 {"type":"nouveau_clip","consigne":"un passage drôle"}  cherche un NOUVEAU clip dans la vidéo
 {"type":"exporter"}                       fabrique le fichier MP4
 {"type":"tous"}                           à AJOUTER si la demande vaut pour tous les clips
@@ -769,6 +786,74 @@ def titre_faible(titre, texte_clip):
     if len(titre) > 90:
         return True
     return bool(texte) and texte.startswith(t[:max(12, int(len(t) * 0.8))])
+
+
+CONSIGNE_ACCROCHE = """Tu écris l'ACCROCHE d'une vidéo TikTok : la phrase en gros texte des 2 premières secondes,
+celle qui empêche de scroller. On te donne ce qui est dit dans le clip et son titre.
+- UNE seule phrase, 3 à 7 mots, en {langue} ;
+- DIFFÉRENTE du titre « {titre} » : n'utilise PAS ses mots importants ni ses chiffres, dis AUTRE CHOSE qui
+  donne envie de rester (tension, question, promesse, réaction) ;
+- fidèle à ce qui est VRAIMENT dit (n'invente rien) ;
+- pas de hashtag, pas de guillemets, au plus un emoji.
+Exemples de ton : « Il a perdu 1000 € en une nuit », « Personne ne vous dit ça », « Attendez la fin… »
+Mots INTERDITS (déjà dans le titre) : {interdits}.
+Propose 3 accroches DIFFÉRENTES les unes des autres.
+Réponds UNIQUEMENT avec ce JSON : {{"accroches": ["...", "...", "..."]}}"""
+
+
+NOMBRES_ECRITS = {"un": "1", "une": "1", "deux": "2", "trois": "3", "quatre": "4", "cinq": "5", "six": "6",
+                  "sept": "7", "huit": "8", "neuf": "9", "dix": "10", "cent": "100", "mille": "1000"}
+
+
+def _mots_importants(texte):
+    """Mots qui portent le sens (chiffres en lettres ramenés en chiffres) : sert à comparer accroche et titre."""
+    mots = re.findall(r"\w+", sans_accents(texte or ""))
+    return {NOMBRES_ECRITS.get(m, m) for m in mots if m.isdigit() or m in NOMBRES_ECRITS or len(m) > 3}
+
+
+def accroche_valable(accroche, titre, texte_clip):
+    """Une accroche qui répète le titre ou recopie la première phrase ne sert à rien."""
+    a, t = _montage._norm(accroche or ""), _montage._norm(titre or "")
+    if not a or len(accroche) > 60 or len((accroche or "").split()) > 9:
+        return False
+    if t and (a == t or a in t or t in a):
+        return False
+    ma, mt = _mots_importants(accroche), _mots_importants(titre)
+    if ma and mt and len(ma & mt) / len(ma) >= 0.5:
+        return False   # mêmes mots que le titre (« Six prélèvements en 2 jours » / « 6 prélèvements en 2 jours »)
+    return not titre_faible(accroche, texte_clip)
+
+
+def proposer_accroche(projet, clip):
+    """Phrase d'accroche des 2,5 premières secondes, écrite par l'IA d'après le clip. "" si rien de valable."""
+    texte_clip = " ".join(w["text"] for w in mots_du_passage(projet.get("segments", []), clip["debut"], clip["fin"]))
+    if not texte_clip.strip():
+        return ""
+    modele = modele_ia.actif()
+    interdits = ", ".join(sorted(w for w in re.findall(r"\w+", (clip.get("titre") or "").lower()) if len(w) > 3 or w.isdigit()))
+    for _ in range(2):   # une 2e série si les 3 premières répètent le titre
+        try:
+            r = requests.post(OLLAMA_URL, json={
+                "model": modele, "format": "json", "stream": False,
+                **({"think": False} if modele.startswith("qwen3") else {}),
+                "messages": [{"role": "system", "content": CONSIGNE_ACCROCHE.format(
+                    titre=clip.get("titre", ""), interdits=interdits or "aucun",
+                    langue=NOMS_LANGUES.get(projet.get("langue", "fr"), projet.get("langue", "fr")))},
+                             {"role": "user", "content": f"Ce qui est dit dans le clip :\n{texte_clip[:3000]}"}],
+                "options": {"temperature": 0.95, "num_ctx": NUM_CTX},
+            }, timeout=120)
+            r.raise_for_status()
+            brut = r.json()["message"]["content"]
+            m = re.search(r"\{.*\}", brut, re.S)
+            d = json.loads(m.group(0) if m else brut)
+            propositions = d.get("accroches") or [d.get("accroche", "")]
+        except Exception:  # noqa: BLE001 — IA indisponible : on gardera le titre en accroche
+            return ""
+        for accroche in propositions if isinstance(propositions, list) else []:
+            accroche = re.sub(r"#\w+", "", str(accroche)).strip(" \"«»'").strip()
+            if accroche_valable(accroche, clip.get("titre"), texte_clip):
+                return accroche
+    return ""
 
 
 def proposer_titres(projet, clip, n=3):
