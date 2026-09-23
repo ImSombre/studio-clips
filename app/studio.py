@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.9"
+VERSION = "4.0"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -168,7 +168,9 @@ def vue_clip(c, p=None):
         try:
             segs = p.get("segments", [])
             blocs, _jonctions = montage.blocs_du_clip(segs, c, v["montage"])
-            v["cadrages"] = vision.plan_cadrage(blocs, segs, p.get("vision"), v["cadrage"], v["montage"])
+            v["cadrages"] = montage.poser_punchs(
+                vision.plan_cadrage(blocs, segs, p.get("vision"), v["cadrage"], v["montage"]),
+                montage.punchs_du_clip(segs, c, v["montage"], v["style"]))
             v["taille_source"] = (p.get("vision") or {}).get("taille")
         except Exception:  # noqa: BLE001 — sans plan, l'aperçu garde le cadrage simple
             traceback.print_exc()

@@ -742,10 +742,23 @@ function rendreCadrage(c, t) {
     const [sx, sy, sw, sh] = src(plan.r), k = Math.min(W / sw, H / sh);
     ctxRendu.drawImage(video, sx, sy, sw, sh, (W - sw * k) / 2, (H - sh * k) / 2, sw * k, sh * k);
   } else {
-    ctxRendu.drawImage(video, ...src(plan.r), 0, 0, W, H);
+    ctxRendu.drawImage(video, ...src(serrer(plan.r, zoomPunch(plan, t))), 0, 0, W, H);
   }
   return plan;
 }
+/* Zoom « punch » sur le mot-clé : +8 % en 0,12 s puis retour en 0,38 s (comme montage.py) */
+function zoomPunch(plan, t) {
+  let z = 0;
+  for (const p of plan.punch || []) {
+    const u = t - p;
+    const b = u >= 0 && u <= 0.12 ? u / 0.12 : u > 0.12 && u <= 0.5 ? 1 - (u - 0.12) / 0.38 : 0;
+    z = Math.max(z, b);
+  }
+  return 1 + 0.08 * z;
+}
+const serrer = (r, z) => (z <= 1.0001 ? r
+  : [r[0] + r[2] * (1 - 1 / z) / 2, r[1] + r[3] * (1 - 1 / z) / 2, r[2] / z, r[3] / z]);
+
 /* Fondu au noir juste avant / juste après une jonction entre deux morceaux (comme à l'export) */
 function rendreFondu(c, t) {
   if (!montageDe(c).transitions || !jonctions.length) return;

@@ -246,6 +246,45 @@ def debut_sur_une_phrase(segments, debut, marge=4.0):
     return round(max(0.0, min(max(base - 0.12, debut - marge), plafond)), 2)
 
 
+PUNCH = 0.08          # zoom « punch » sur le mot-clé : +8 % d'un coup, puis on revient
+PUNCH_ECART = 2.5     # jamais deux punchs à moins de 2,5 s (sinon ça donne le mal de mer)
+
+
+def punchs_du_clip(segments, clip, montage=None, style=None):
+    """Instants (temps de la vidéo source) où l'image « punche » : sur le mot-clé des sous-titres.
+    Seulement avec les zooms ET les sous-titres animés (c'est le même mot qui passe en couleur)."""
+    m = {**MONTAGE_DEFAUT, **(montage if montage is not None else clip.get("montage") or {})}
+    if not (m["zooms"] and m["anim"]):
+        return []
+    n = int({**STYLE_DEFAUT, **(style if style is not None else clip.get("style") or {})}["mots"])
+    instants = []
+    for a, b in passages_du_clip(clip):
+        for g in groupes_sous_titres(mots_du_passage(segments, a, b), a, b, n):
+            i = mot_cle(g["mots"])
+            if i is None:
+                continue
+            t = a + g["mots"][i]["debut"]
+            if (not instants or t - instants[-1] >= PUNCH_ECART) and t - a >= 1.0:   # pas pendant l'accroche
+                instants.append(round(t, 3))
+    return instants
+
+
+def poser_punchs(plans, instants):
+    """Chaque plan « visage » garde les punchs qui tombent chez lui (pas l'écran partagé ni le fond flou :
+    zoomer y couperait l'info affichée)."""
+    for p in plans:
+        p["punch"] = ([t for t in instants if p["de"] + 0.05 <= t <= p["a"] - 0.55]
+                      if p.get("type") == "rect" else [])
+    return plans
+
+
+def _expr_punch(relatifs):
+    """Expression zoompan : chaque punch monte en 0,12 s puis redescend en 0,38 s."""
+    bosses = [f"if(between(it-{t:.3f},0,0.12),(it-{t:.3f})/0.12,"
+              f"if(between(it-{t:.3f},0.12,0.5),1-(it-{t:.3f}-0.12)/0.38,0))" for t in relatifs]
+    return f"1+{PUNCH}*(" + "+".join(bosses) + ")"
+
+
 def duree_montee(blocs):
     return sum(b - a for a, b in blocs)
 
@@ -424,6 +463,11 @@ def filtre_plan(plan, sw, sh, duree=0.0, entree=False, sortie=False):
                 f"crop={LARGEUR}:{HAUTEUR},boxblur=25:5[bgb];[fg]{_px(plan['r'], sw, sh)},"
                 f"scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=decrease[fgs];"
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
+    relatifs = [round(t - plan["de"], 3) for t in plan.get("punch") or () if 0 <= t - plan["de"] <= duree]
+    if relatifs:
+        zoom = (f",zoompan=z='{_expr_punch(relatifs)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":d=1:s={LARGEUR}x{HAUTEUR}:fps={FPS}")
+        return fini(debut + f"{_px(plan['r'], sw, sh)},scale={LARGEUR}:{HAUTEUR},setsar=1{zoom}[v]")
     return fini(debut + f"{_px(plan['r'], sw, sh)},scale={LARGEUR}:{HAUTEUR},setsar=1[v]")
 
 
@@ -475,6 +519,7 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
         p["de"] = debut + round((p["de"] - debut) * FPS) / FPS
         p["a"] = debut + round((p["a"] - debut) * FPS) / FPS
     plans = [p for p in plans if p["a"] - p["de"] >= 1 / FPS]
+    poser_punchs(plans, punchs_du_clip(segments, clip, montage, style))
     sw, sh = (vision or {}).get("taille") or _vision.taille_video(source)
     # un fondu là où deux morceaux différents se rejoignent (jamais au milieu d'un passage)
     debuts_jonction = {blocs[i][0] for i in jonctions}
