@@ -254,6 +254,11 @@ def appliquer(projet, clip, actions):
             elif typ == "montage":
                 avant_modif()
                 mt = {**MONTAGE_DEFAUT, **clip.get("montage", {})}
+                if "musique" in a:
+                    mt["musique"] = str(a["musique"] or "")
+                if "musique_volume" in a:
+                    mt["musique_volume"] = max(0.02, min(1.0, float(a["musique_volume"])))
+                    fait.append(f"musique à {round(mt['musique_volume'] * 100)} %")
                 noms = {"coupes": "blancs coupés", "zooms": "zooms", "anim": "sous-titres animés",
                         "accroche": "accroche", "barre": "barre de progression", "transitions": "fondus"}
                 for cle, nom in noms.items():
@@ -486,6 +491,13 @@ def lecture_rapide(message, historique=None):
         mt["barre"] = not re.search(non + r".{0,12}barre", t)
     if re.search(r"transition|fondus?\b", t):
         mt["transitions"] = not re.search(non + r".{0,14}(transition|fondus?)", t)
+    if re.search(r"musique|son de fond|fond sonore", t):
+        if re.search(non + r".{0,14}(musique|son de fond|fond sonore)", t):
+            mt["musique"] = ""          # « enlève la musique »
+        elif re.search(r"(moins|baisse|doucement|plus bas)", t):
+            mt["musique_volume"] = 0.15
+        elif re.search(r"(plus fort|monte|augmente)", t):
+            mt["musique_volume"] = 0.6
     if mt:
         actions = [x for x in actions if not (x["type"] == "cadrage" and "zoom" in t and "auto" not in x)]
         actions.append({"type": "montage", **mt})

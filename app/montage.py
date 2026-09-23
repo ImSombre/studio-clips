@@ -145,7 +145,8 @@ LANGUES_SANS_ESPACES = ("zh", "ja", "ko", "th", "yue", "lo", "my")
 # ----------------------------------------------------------------------
 # coupes = retirer les blancs : désactivé par défaut (sur un passage continu, ça hache pour rien)
 MONTAGE_DEFAUT = {"coupes": False, "zooms": True, "anim": True, "accroche": True, "barre": True,
-                  "transitions": True}   # fondu entre deux passages assemblés
+                  "transitions": True,   # fondu entre deux passages assemblés
+                  "musique": "", "musique_volume": 0.35}   # musique de fond choisie par l'utilisateur
 FONDU = 0.25             # durée du fondu image (s) ; le son a le sien, plus court
 FPS = 30
 TROU_MIN = 0.45          # silence (s) à partir duquel on coupe
@@ -216,6 +217,33 @@ def blocs_du_clip(segments, clip, montage=None):
             jonctions.add(len(blocs))
         blocs += part
     return blocs, jonctions
+
+
+# Mots qui ne valent rien en ouverture de clip : on démarre APRÈS eux.
+DEBUTS_MOUS = HESITATIONS | {"alors", "donc", "bah", "ben", "voila", "voilà", "enfin", "bref", "et", "mais",
+                             "puis", "apres", "après", "la", "là", "ouais", "ok", "bon"}
+
+
+def debut_sur_une_phrase(segments, debut, marge=4.0):
+    """Recale le début du clip sur un début de phrase et saute les « alors… euh… du coup… ».
+    Ne décale jamais de plus de `marge + 2` secondes : le passage choisi par l'IA reste le même."""
+    mots = mots_du_passage(segments, max(0.0, debut - marge), debut + marge + 5)
+    if not mots:
+        return round(debut, 2)
+    phrases = [w["start"] for i, w in enumerate(mots)
+               if i and mots[i - 1]["text"].rstrip().endswith((".", "?", "!")) and abs(w["start"] - debut) <= marge]
+    base = min(phrases, key=lambda t: abs(t - debut)) if phrases else max(debut, mots[0]["start"])
+    plafond = debut + marge + 2
+    i = next((k for k, w in enumerate(mots) if w["start"] >= base - 0.01), None)
+    while i is not None and i < len(mots) - 1:   # on saute le remplissage en tête
+        mot, suivant = _norm(mots[i]["text"]), _norm(mots[i + 1]["text"])
+        if mot in DEBUTS_MOUS and mots[i]["end"] <= plafond:
+            base, i = mots[i]["end"], i + 1
+        elif mot == "du" and suivant == "coup" and mots[i + 1]["end"] <= plafond:
+            base, i = mots[i + 1]["end"], i + 2
+        else:
+            break
+    return round(max(0.0, min(max(base - 0.12, debut - marge), plafond)), 2)
 
 
 def duree_montee(blocs):
@@ -486,7 +514,8 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
             _ffmpeg(["ffmpeg", "-y", "-ss", f"{plan['de']:.3f}", "-i", os.path.abspath(source),
                      "-filter_complex", graphe, "-map", "[v]", "-frames:v", str(n),
                      *(["-map", "[a]", "-c:a", "pcm_s16le"] if avec_son else []),
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p",
+                     # intermédiaire : le plus rapide possible, la qualité est gardée par un crf bas
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "14", "-pix_fmt", "yuv420p",
                      "-progress", "pipe:1", "-nostats", morceau], dossier_tmp,
                     lambda t, f0=fait: progression(min(74, int((f0 + t) / max(total, 0.1) * 75))))
             fait += n / FPS
@@ -503,11 +532,32 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
         ecrire_ass(groupes, style, os.path.join(dossier_tmp, "subs.ass"), titre_ass, texte["taille"],
                    clip.get("langue", "fr"), anim=montage["anim"], accroche=accroche if accroche and accroche[0] else None,
                    barre_duree=duree_sortie if montage["barre"] else None, tranches=tranches_st)
+        musique = (montage.get("musique") or "").strip()
+        musique = musique if avec_son and musique and os.path.exists(musique) else ""
+        if musique:
+            vol = max(0.0, min(1.0, float(montage.get("musique_volume", 0.35))))
+            # La musique est d'abord RAMENÉE À UN NIVEAU CONNU : sans ça, un morceau doux devient
+            # inaudible et un morceau fort écrase la voix. Le réglage choisit ce niveau (-38 à -22 LUFS),
+            # la voix finissant vers -16 : la musique reste dessous. Puis elle baisse encore dès qu'on parle.
+            cible = -38 + 16 * vol
+            filtre_son = (f"[1:a]aloop=loop=-1:size=2000000000,atrim=0:{duree_sortie:.3f},asetpts=PTS-STARTPTS,"
+                          f"loudnorm=I={cible:.0f}:TP=-3:LRA=7,"
+                          f"afade=t=out:st={max(0, duree_sortie - 1.2):.3f}:d=1.2[mus];"
+                          "[0:a]asplit=2[voix1][voix2];"
+                          "[mus][voix2]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[musb];"
+                          "[voix1][musb]amix=inputs=2:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+
         provisoire = os.path.splitext(os.path.abspath(sortie))[0] + ".encodage.mp4"
         try:
-            _ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "liste.txt", "-vf", "ass=subs.ass",
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS),
-                     *(["-c:a", "aac", "-b:a", "160k"] if avec_son else ["-an"]), "-movflags", "+faststart",
+            son = (["-filter_complex", filtre_son, "-map", "0:v", "-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
+                   if musique else
+                   ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "160k"] if avec_son else ["-an"])
+            _ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "liste.txt",
+                     *(["-i", os.path.abspath(musique)] if musique else []),
+                     "-vf", "ass=subs.ass",
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(FPS),
+                     # son remonté au niveau attendu par TikTok (-14 LUFS) : sinon le clip paraît étouffé
+                     *son, "-movflags", "+faststart",
                      "-progress", "pipe:1", "-nostats", provisoire], dossier_tmp,
                     lambda t: progression(75 + min(24, int(t / max(duree_sortie, 0.1) * 25))))
         except RuntimeError:
@@ -517,9 +567,22 @@ def exporter_clip(source, segments, clip, sortie, progression=lambda pct: None, 
                 pass
             raise
         os.replace(provisoire, os.path.abspath(sortie))
+        couverture(os.path.abspath(sortie), min(1.2, duree_sortie / 3))
         progression(100)
     finally:
         shutil.rmtree(dossier_tmp, ignore_errors=True)
+
+
+def couverture(clip_mp4, instant=1.2):
+    """Image de couverture du clip (à côté du MP4) : pratique pour la publier sur TikTok."""
+    image = os.path.splitext(clip_mp4)[0] + ".jpg"
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(0.1, instant):.2f}", "-i", clip_mp4,
+                        "-frames:v", "1", "-q:v", "3", image],
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
+        return image if os.path.exists(image) else ""
+    except OSError:
+        return ""
 
 
 def dimensions(video):

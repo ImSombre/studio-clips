@@ -239,6 +239,27 @@ def _split_in_chunks(lines):
     return chunks
 
 
+def _recalibrer(clips, log=print):
+    """Chaque partie de la transcription est notée dans son coin : une partie généreuse met des 9 partout,
+    une partie sévère des 6. On recentre les notes de chaque partie sur la moyenne générale."""
+    par_partie = {}
+    for c in clips:
+        par_partie.setdefault(c.get("_partie"), []).append(c)
+    if len(par_partie) < 2 or len(clips) < 4:
+        return clips
+    moyenne_generale = sum(c["score"] for c in clips) / len(clips)
+    for partie, liste in par_partie.items():
+        if len(liste) < 2:
+            continue
+        ecart = sum(c["score"] for c in liste) / len(liste) - moyenne_generale
+        if abs(ecart) < 0.3:
+            continue
+        log(f"  Notes de la partie {partie} recentrées ({ecart:+.1f}).")
+        for c in liste:
+            c["score"] = round(min(10.0, max(0.0, c["score"] - ecart * 0.7)), 2)
+    return clips
+
+
 def find_best_clips(
     full_text_with_timestamps: str,
     model: str = OLLAMA_MODEL,
@@ -290,6 +311,9 @@ def find_best_clips(
             continue
         if clips:
             log(f"    -> {len(clips)} extrait(s) trouvé(s) dans cette partie.")
+        for c in clips:
+            if isinstance(c, dict):
+                c["_partie"] = idx   # d'où vient la note : sert à les remettre sur la même échelle
         all_clips.extend(clips)
 
     if echecs and echecs == len(chunks):
@@ -300,6 +324,7 @@ def find_best_clips(
     valid_clips = [
         c for c in (_normalize_clip(c, video_duration, log, clip_min, clip_max) for c in all_clips) if c
     ]
+    _recalibrer(valid_clips, log)
 
     # Du mieux noté au moins bien noté ; à note égale, le plus tôt dans la vidéo.
     valid_clips.sort(key=lambda c: (-c["score"], c["start"]))

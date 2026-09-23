@@ -501,7 +501,8 @@ const MOTS_VIDES = new Set(("alors aussi avait avant avec cette comme comment da
   "tout toute toutes tous très trop vais votre vous about after again because before being could their there these thing think " +
   "those would really right").split(" "));
 const normMot = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}_]/gu, "");
-const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, transitions: true, ...(c?.montage || {}) });
+const montageDe = (c) => ({ coupes: false, zooms: true, anim: true, accroche: true, barre: true, transitions: true,
+  musique: "", musique_volume: 0.35, ...(c?.montage || {}) });
 const FONDU = 0.25;   // fondu entre deux morceaux assemblés (même valeur que montage.py)
 /* Un clip peut assembler PLUSIEURS morceaux de la vidéo. Un seul, par défaut. */
 const passagesDe = (c) => (c?.passages?.length ? c.passages : [[c.debut, c.fin]]).map(([a, b]) => [+a, +b]);
@@ -622,6 +623,20 @@ function rendreHabillage(c, tSortie) {
     $("i", barre).style.width = `${Math.min(100, (tSortie / Math.max(dureeMontee(blocs), 0.1)) * 100)}%`;
   }
 }
+
+/* Musique de fond : le fichier est choisi par l'utilisateur (rien n'est téléchargé) */
+function changerMontage(partiel) {
+  const c = clip(); if (!c) return;
+  c.montage = { ...montageDe(c), ...partiel };
+  calculerSousTitres(); remplirReglages(c); majZone(); afficherClips(false);
+  planifierPatch({ montage: partiel }, 0);
+}
+$("#r-musique").addEventListener("click", () => uneFois("musique", async () => {
+  const r = await api("/api/musique", { body: {} });
+  if (r?.chemin) { changerMontage({ musique: r.chemin }); toast("Musique ajoutée — elle baisse toute seule quand ça parle"); }
+}));
+$("#r-musique-off").addEventListener("click", () => changerMontage({ musique: "" }));
+$("#r-musique-vol").addEventListener("input", (e) => changerMontage({ musique_volume: +e.target.value / 100 }));
 
 /* Interrupteurs « Montage auto » */
 $("#r-montage").addEventListener("click", (e) => {
@@ -1000,6 +1015,13 @@ function remplirReglages(c) {
   $("#v-decalage").textContent = cad.decalage > 0 ? `+${cad.decalage}` : cad.decalage;
   const mt = montageDe(c);
   $$("#r-montage [data-m]").forEach((b) => b.setAttribute("aria-pressed", String(!!mt[b.dataset.m])));
+  const musique = (mt.musique || "").trim();
+  $("#nom-musique").textContent = musique ? musique.split(/[\\/]/).pop() : "";
+  $("#r-musique-off").hidden = !musique;
+  $("#ligne-musique-vol").hidden = !musique;
+  $("#r-musique").textContent = musique ? "♪ Changer…" : "♪ Musique de fond…";
+  if (actif !== $("#r-musique-vol")) $("#r-musique-vol").value = Math.round((mt.musique_volume ?? 0.35) * 100);
+  $("#v-musique-vol").textContent = `${Math.round((mt.musique_volume ?? 0.35) * 100)}%`;
   const tx = c.texte || {};
   $("#r-titre").setAttribute("aria-pressed", String(!!tx.titre));
   $("#r-partie").setAttribute("aria-pressed", String(!!tx.partie));

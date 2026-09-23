@@ -82,13 +82,22 @@ def preparer(app_dir):
     etat.update(etat="pret", message="")
 
 
-def choix_transcription(ram_go):
-    """(modèle, appareil, précision, largeur de recherche) selon la machine."""
+def choix_transcription(ram_go, duree_s=None):
+    """(modèle, appareil, précision, largeur de recherche) selon la machine ET la longueur de la vidéo.
+
+    Mesuré sur 3 min de parole, processeur, 4 fils : « base » transcrit à ×20 le temps réel,
+    « small » à ×7 — donc small coûte ~7 min sur une vidéo d'1 h 20, pour un texte bien meilleur.
+    Comme les sous-titres, le choix des passages et les titres viennent tous de ce texte, on prend
+    small dès que la machine suit, et on ne retombe sur base que sur un PC vraiment juste
+    (ou sur une vidéo très longue avec peu de cœurs, pour ne pas faire attendre une heure)."""
     if etat["etat"] == "pret":
         activer_dll()
         return ("large-v3-turbo" if etat["vram"] >= 5500 else "small"), "cuda", "int8_float16", 5
+    coeurs = os.cpu_count() or 2
+    assez_de_machine = ram_go >= 8 and coeurs >= 4
+    tres_longue = (duree_s or 0) > 90 * 60 and coeurs < 8
     # processeur : recherche simple (beam 1), ~2x plus rapide pour une qualité quasi identique
-    return ("small" if ram_go >= 15 else "base"), "cpu", "int8", 1
+    return ("small" if assez_de_machine and not tres_longue else "base"), "cpu", "int8", 1
 
 
 def lancer_en_fond(app_dir):

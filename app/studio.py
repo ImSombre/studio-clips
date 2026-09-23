@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "3.8"
+VERSION = "3.9"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -189,15 +189,17 @@ def vue_projet(p, avec_segments=True):
 
 
 def nouveau_clip(c, segments):
+    # Les 3 premières secondes décident : on démarre sur une phrase, pas sur « alors… euh… ».
+    debut = montage.debut_sur_une_phrase(segments, float(c["start"]))
     # Les blancs seront coupés : on prend un peu plus large pour que le clip MONTÉ garde la durée voulue.
     fin_max = segments[-1]["end"] if segments else c["end"]
-    fin = montage.fin_pour_duree(segments, c["start"], c["end"] - c["start"], None, fin_max)
-    fin = assistant._fin_sur_un_mot(segments, c["start"], fin)
-    if c["end"] - c["start"] >= 60 and fin - c["start"] < 60.5:   # le recalage ne doit pas repasser sous 1 min
-        fin = min(fin_max, max(assistant._fin_sur_un_mot(segments, c["start"], c["start"] + 62.5), c["start"] + 60.5))
+    fin = montage.fin_pour_duree(segments, debut, c["end"] - c["start"], None, fin_max)
+    fin = assistant._fin_sur_un_mot(segments, debut, fin)
+    if c["end"] - c["start"] >= 60 and fin - debut < 60.5:   # le recalage ne doit pas repasser sous 1 min
+        fin = min(fin_max, max(assistant._fin_sur_un_mot(segments, debut, debut + 62.5), debut + 60.5))
     return {
         "id": uuid.uuid4().hex[:8], "titre": c.get("title") or "Extrait", "raison": c.get("reason", ""),
-        "note": c.get("score", 5), "debut": round(c["start"], 2), "fin": max(round(c["start"] + 3, 2), fin),
+        "note": c.get("score", 5), "debut": round(debut, 2), "fin": max(round(debut + 3, 2), fin),
         "style": dict(montage.STYLE_DEFAUT), "cadrage": dict(montage.CADRAGE_DEFAUT),
         "texte": dict(montage.TEXTE_DEFAUT), "exporte": None, "historique": [],
     }
@@ -305,6 +307,46 @@ def _decoupage_de_secours(p, bornes):
             break
         t = suivant
     return clips
+
+
+def _trier_par_image(p, trouves, job=None, pct=(0, 100)):
+    """L'IA ne lit que le texte. On regarde le DÉBUT de chaque passage proposé : un visage à l'écran
+    ou une info affichée valent mieux qu'un plan où il ne se passe rien. Les notes sont ajustées."""
+    if len(trouves) < 2 or not p.get("source") or not os.path.exists(p["source"]):
+        return trouves
+    zones = [(float(c["start"]), min(float(c["start"]) + 8, float(c["end"]))) for c in trouves]
+
+    def suivi(fraction):
+        if job is not None:
+            job["pct"] = int(pct[0] + (pct[1] - pct[0]) * fraction)
+
+    try:
+        res = vision.analyser(p["source"], zones, suivi, lambda: bool(job and job.get("annule")))
+    except InterruptedError:
+        raise Arret() from None
+    except Exception:  # noqa: BLE001 — OpenCV absent ou vidéo illisible : on garde l'ordre de l'IA
+        traceback.print_exc()
+        return trouves
+    with verrou:   # les images analysées resservent pour le cadrage : on ne les jette pas
+        ancien = p.get("vision") or {}
+        deja = {round(e["t"], 2) for e in ancien.get("echantillons", [])}
+        p["vision"] = {"taille": res["taille"],
+                       "echantillons": sorted(ancien.get("echantillons", [])
+                                              + [e for e in res["echantillons"] if round(e["t"], 2) not in deja],
+                                              key=lambda e: e["t"])}
+    for c, (a, b) in zip(trouves, zones):
+        ech = [e for e in res["echantillons"] if a - 0.01 <= e["t"] <= b + 0.01]
+        if not ech:
+            continue
+        visages = sum(1 for e in ech if e["visages"]) / len(ech)
+        infos = sum(1 for e in ech if e["infos"]) / len(ech)
+        bonus = (0.6 if visages >= 0.4 else 0) + (0.8 if infos >= 0.3 else 0)
+        if visages < 0.2 and infos < 0.1:
+            bonus -= 0.6   # rien à regarder : ni visage, ni info affichée
+        c["score"] = round(min(10.0, max(0.0, float(c.get("score", 5)) + bonus)), 2)
+        c["_image"] = {"visages": round(visages, 2), "infos": round(infos, 2), "bonus": bonus}
+    trouves.sort(key=lambda c: (-float(c.get("score", 5)), float(c["start"])))
+    return trouves
 
 
 def _titres_corrects(p, clips, job=None, pct=(0, 100)):
@@ -437,7 +479,8 @@ def job_analyse(pid):
                             job["pct"] = base_transcription + int(int(m.group(1)) * (66 - base_transcription) / 100)
                     job["pct"] = base_transcription
                     # Carte graphique NVIDIA si possible, sinon processeur (modèle selon la mémoire du PC)
-                    taille, appareil, precision, largeur = acceleration.choix_transcription(modele_ia.ram_go())
+                    taille, appareil, precision, largeur = acceleration.choix_transcription(
+                        modele_ia.ram_go(), p.get("duree") or get_video_duration(p["source"]))
                     segments, _, langue = transcribe_video(
                         p["source"], model_size=taille, log=log_transcription, device=appareil, compute=precision,
                         beam=largeur, debut=p.get("debut_zone"), fin=p.get("fin_zone"))
@@ -467,11 +510,16 @@ def job_analyse(pid):
                 options = {"clip_min": bornes[0], "clip_max": bornes[1]} if bornes else {}
                 trouves = find_best_clips(
                     _texte_horodate(p["segments"]), model=modele_ia.actif(), log=log_analyse,
-                    custom_instructions=p.get("consigne", ""), video_duration=p.get("duree"), **options,
+                    custom_instructions=p.get("consigne", ""), video_duration=p.get("duree"),
+                    max_clips=8, **options,   # on en demande plus : l'image départagera
                 )
                 secours = False
                 if not trouves:
                     trouves, secours = _decoupage_de_secours(p, bornes), True
+                else:
+                    job["etape"], job["message"] = "L'IA regarde l'image des passages", ""
+                    trouves = _trier_par_image(p, trouves, job, (86, 88))[:5]
+                    trouves.sort(key=lambda c: float(c["start"]))
                 with verrou:
                     p["clips"] = [nouveau_clip(c, p["segments"]) for c in trouves]
                     sauver(p)
@@ -740,6 +788,24 @@ def _choisir_fichier(titre):
 @app.post("/api/choisir")
 def choisir_video():
     return jsonify({"chemin": _choisir_fichier("Choisis ta vidéo")})
+
+
+@app.post("/api/musique")
+def choisir_musique():
+    """Ouvre le sélecteur de fichiers pour choisir une musique de fond (mp3, wav…)."""
+    code = (
+        "import tkinter as tk; from tkinter import filedialog\n"
+        "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+        "p = filedialog.askopenfilename(title='Choisis une musique de fond', filetypes="
+        "[('Musique', '*.mp3 *.wav *.m4a *.aac *.ogg *.flac *.opus'), ('Tous les fichiers', '*.*')])\n"
+        "print(p or '')"
+    )
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    exe = sys.executable.replace("pythonw.exe", "python.exe")
+    r = subprocess.run([exe, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=env, creationflags=NO_WIN)
+    chemin = r.stdout.strip()
+    return jsonify({"chemin": os.path.normpath(chemin) if chemin else ""})
 
 
 @app.post("/api/projets")
