@@ -459,8 +459,10 @@ def filtre_plan(plan, sw, sh, duree=0.0, entree=False, sortie=False):
                 f"[b]{_px(plan['r2'], sw, sh)},scale={LARGEUR}:{moitie},setsar=1[bb];"
                 f"[hh][bb]vstack=inputs=2,drawbox=x=0:y={moitie - 3}:w={LARGEUR}:h=6:color=black:t=fill[v]")
     if plan["type"] == "flou":      # le contenu entier, sur un fond flouté
-        return fini(debut + f"split=2[bg][fg];[bg]scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=increase,"
-                f"crop={LARGEUR}:{HAUTEUR},boxblur=25:5[bgb];[fg]{_px(plan['r'], sw, sh)},"
+        # fond flou calculé en PETIT (270x480) puis agrandi : 9x plus rapide pour le même rendu
+        # (mesuré : 4,4 s -> 0,5 s pour 6 s de clip)
+        return fini(debut + f"split=2[bg][fg];[bg]scale=270:480:force_original_aspect_ratio=increase,"
+                f"crop=270:480,boxblur=8:2,scale={LARGEUR}:{HAUTEUR}[bgb];[fg]{_px(plan['r'], sw, sh)},"
                 f"scale={LARGEUR}:{HAUTEUR}:force_original_aspect_ratio=decrease[fgs];"
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[v]")
     relatifs = [round(t - plan["de"], 3) for t in plan.get("punch") or () if 0 <= t - plan["de"] <= duree]

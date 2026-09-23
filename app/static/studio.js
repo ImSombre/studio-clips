@@ -65,9 +65,22 @@ addEventListener("unhandledrejection", (e) => { e.preventDefault(); toast(e.reas
 function toast(texte) {
   const t = $("#toast");
   t.textContent = texte;
+  t.classList.remove("action");
   t.classList.add("visible");
   clearTimeout(toast.m);
   toast.m = setTimeout(() => t.classList.remove("visible"), 2600);
+}
+/* Toast avec un bouton (ex. « Corriger partout ») : reste plus longtemps, le temps de cliquer */
+function toastAction(texte, libelle, action) {
+  const t = $("#toast");
+  t.textContent = texte + " ";
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "toast-bouton"; b.textContent = libelle;
+  b.addEventListener("click", () => { t.classList.remove("visible", "action"); action(); }, { once: true });
+  t.appendChild(b);
+  t.classList.add("visible", "action");
+  clearTimeout(toast.m);
+  toast.m = setTimeout(() => t.classList.remove("visible", "action"), 9000);
 }
 
 const fmt = (s) => {
@@ -671,7 +684,7 @@ function calculerSousTitres() {
 let dernierRendu = "";
 function rendreSousTitre(t) {
   const c = clip(), el = $("#soustitre");
-  if (!c) return;
+  if (!c || el.querySelector(".mot-edit")) return;   // correction d'un mot en cours : on n'écrase pas le champ
   const s = c.style;
   const echelle = ecran.clientHeight / 1920;
   const i = groupes.findIndex((g) => t >= g.debut && t < g.fin);
@@ -698,8 +711,8 @@ function rendreSousTitre(t) {
   const iCle = anim ? motCle(groupes[i].mots) : -1;
   el.innerHTML = groupes[i].mots.map((w, k) => {
     const txt = echap(s.majuscules ? w.text.toLocaleUpperCase("fr-FR") : w.text);
-    if (s.surligne && s.surligne !== "aucun" && k === actif) return `<span style="color:${s.surligne}">${txt}</span>`;
-    return `<span${k === iCle ? ' class="cle"' : ""}>${txt}</span>`;
+    if (s.surligne && s.surligne !== "aucun" && k === actif) return `<span data-t="${w.start}" style="color:${s.surligne}">${txt}</span>`;
+    return `<span data-t="${w.start}"${k === iCle ? ' class="cle"' : ""}>${txt}</span>`;
   }).join(" ");
 }
 
@@ -1401,6 +1414,56 @@ $("#titre-ecran").addEventListener("dblclick", (e) => {
     dernierRendu = "";
     if (garder && texte) changerTexte({ contenu: texte === c.titre ? "" : texte });
     else remplirReglages(c);
+  };
+  champ.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") valider(true);
+    if (ev.key === "Escape") valider(false);
+  });
+  champ.addEventListener("blur", () => valider(true));
+});
+
+/* =================== corriger un mot mal transcrit : double-clic dessus =================== */
+function appliquerCorrections(changes) {
+  for (const ch of changes || []) {
+    for (const s of P.segments || []) {
+      const w = (s.words || []).find((x) => Math.abs(x.start - ch.instant) <= 0.03);
+      if (w) { w.text = ch.texte; s.text = s.words.map((x) => x.text).join(" "); break; }
+    }
+  }
+  calculerSousTitres(); dernierRendu = ""; rendreSousTitre(video.currentTime);
+}
+$("#soustitre").addEventListener("dblclick", (e) => {
+  const span = e.target.closest("span[data-t]"); const c = clip();
+  if (!span || !c) return;
+  e.preventDefault(); e.stopPropagation();
+  video.pause();
+  const instant = +span.dataset.t;
+  const mot = (P.segments || []).flatMap((s) => s.words || []).find((w) => Math.abs(w.start - instant) <= 0.03);
+  if (!mot) return;
+  const champ = document.createElement("input");
+  champ.className = "te-edit mot-edit";
+  champ.value = mot.text.replace(/^\W+|\W+$/gu, "");
+  champ.title = "Entrée pour corriger, Échap pour annuler";
+  span.replaceWith(champ);
+  champ.focus(); champ.select();
+  let fini = false;
+  const valider = async (garder) => {
+    if (fini) return;
+    fini = true;
+    const texte = champ.value.trim();
+    champ.remove(); dernierRendu = "";
+    if (!garder || !texte || texte === mot.text.replace(/^\W+|\W+$/gu, "")) { rendreSousTitre(video.currentTime); return; }
+    const r = await api(`/api/projets/${P.id}/mots`, { body: { instant, par: texte } });
+    appliquerCorrections(r.changes);
+    c.exporte = null; majEtatExport(c);
+    if (r.autres > 0) {
+      toastAction(`Corrigé. « ${r.ancien} » apparaît encore ${r.autres} fois dans la vidéo.`, "Corriger partout", async () => {
+        const r2 = await api(`/api/projets/${P.id}/mots`, { body: { de: r.ancien, par: texte } });
+        appliquerCorrections(r2.changes);
+        toast(`${r2.changes.length} autre(s) « ${r.ancien} » corrigé(s)`);
+      });
+    } else toast("Mot corrigé");
   };
   champ.addEventListener("keydown", (ev) => {
     ev.stopPropagation();

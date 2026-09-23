@@ -435,6 +435,12 @@ input[type=range] { flex: 1; accent-color: var(--rec); height: 20px; }
   transition: opacity .25s, transform .35s var(--ease);
 }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+.toast.action { pointer-events: auto; }
+.toast-bouton {
+  margin-left: 10px; padding: 4px 12px; border-radius: 999px; border: 0; cursor: pointer;
+  background: var(--rec); color: #fff; font: 700 13px var(--corps);
+}
+.soustitre .mot-edit { font-size: .8em; width: auto; min-width: 4em; max-width: 90%; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--trait); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }

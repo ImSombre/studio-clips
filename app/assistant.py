@@ -31,6 +31,7 @@ CE_QUE_JE_SAIS_FAIRE = (
     "• titres : « trouve-moi un titre », « donne un titre à tous les clips », « renomme le clip en … »\n"
     "• plusieurs morceaux dans un clip : « assemble les meilleurs moments », « ajoute le passage de 3:10 à 3:40 », "
     "« enlève le 2e passage », « sans fondus »\n"
+    "• corriger les sous-titres : « il a écrit Ziggy au lieu de Zigi », ou double-clic sur le mot dans l'aperçu\n"
     "• « trouve-moi un passage drôle », « exporte », « annule »\n"
     "Ajoute « sur tous les clips » pour appliquer partout."
 )
@@ -112,6 +113,40 @@ def annuler(clip):
     for k, v in precedent.items():
         clip[k] = v
     return True
+
+
+def remplacer_mot(segments, par, instant=None, de=None):
+    """Corrige un mot mal transcrit : celui qui commence à `instant`, ou TOUS les « de ».
+    La ponctuation collée au mot est gardée (« Ziggy, » -> « Zigi, »).
+    Retourne [(instant, nouveau_texte)] des mots changés."""
+    par = (par or "").strip()
+    if not par or (instant is None and not de):
+        return []
+    cible = _montage._norm(de) if de else None
+    changes = []
+    for s in segments:
+        mots = s.get("words") or []
+        touche = False
+        for w in mots:
+            if instant is not None:
+                if abs(float(w["start"]) - float(instant)) > 0.03:
+                    continue
+            elif _montage._norm(w["text"]) != cible:
+                continue
+            m = re.match(r"^(\W*)(.*?)(\W*)$", w["text"], re.S)
+            nouveau = (m.group(1) + par + m.group(3)) if m else par
+            if nouveau != w["text"]:
+                w["text"] = nouveau
+                changes.append((w["start"], nouveau))
+                touche = True
+        if touche:
+            s["text"] = " ".join(w["text"] for w in mots)
+    return changes
+
+
+def compter_mot(segments, de):
+    cible = _montage._norm(de or "")
+    return sum(1 for s in segments for w in s.get("words") or [] if cible and _montage._norm(w["text"]) == cible)
 
 
 def poser_passages(clip, liste, duree_video=None):
@@ -312,6 +347,10 @@ def appliquer(projet, clip, actions):
                 speciales.append("annuler")
             elif typ == "exporter":
                 speciales.append("exporter")
+            elif typ == "corriger_mot":
+                de, par = str(a.get("de", "")).strip(), str(a.get("par", "")).strip()
+                if de and par:
+                    speciales.append(("corriger_mot", de, par))   # appliqué par le studio, sous verrou
             elif typ == "nouveau_clip":
                 speciales.append(("nouveau_clip", str(a.get("consigne", "")).strip()))
         except (KeyError, ValueError, TypeError):
@@ -347,6 +386,17 @@ def lecture_rapide(message, historique=None):
         return [{"type": "exporter"}]
     if re.search(r"\b(un autre|nouveau|nouvel|trouve[- ]moi|cherche[- ]moi|cherche)\s+(\w+\s+){0,3}?(clip|passage|extrait|moment)", t):
         return [{"type": "nouveau_clip", "consigne": message}]
+
+    # « il a écrit Ziggy au lieu de Zigi », « corrige "Ziggy" en "Zigi" », « remplace le mot Ziggy par Zigi »
+    brut_msg = message.strip()
+    q = "[\"«'“”»]?"
+    m = (re.search(rf"(?:[ée]crit|mis|marqu[ée])\s+{q}\s*(.+?)\s*{q}\s+au lieu de\s+{q}\s*(.+?)\s*{q}\s*[.!]?$",
+                   brut_msg, re.I)
+         or re.search(r"(?:corrige|remplace)\s+(?:le mot\s+)?[\"«'“]\s*(.+?)\s*[\"»'”]\s+(?:en|par)\s+"
+                      r"[\"«'“]?\s*(.+?)\s*[\"»'”]?\s*[.!]?$", brut_msg, re.I)
+         or re.search(r"(?:corrige|remplace)\s+le mot\s+(\S+)\s+(?:en|par)\s+(.+?)\s*[.!]?$", brut_msg, re.I))
+    if m and len(m.group(1)) <= 40 and len(m.group(2)) <= 40:
+        actions.append({"type": "corriger_mot", "de": m.group(1).strip(), "par": m.group(2).strip()})
 
     # « ajoute le passage de 3:10 à 3:40 », « assemble les meilleurs moments », « enlève le 2e passage »
     m = re.search(r"(ajoute|rajoute|colle|met[s]?)\w*\b[^0-9]{0,30}(\d{1,3}\s*[:hm]\s*\d{1,2}|\d+(?:[.,]\d+)?\s*s?)"
@@ -788,6 +838,8 @@ def traiter_message(projet, clip, message, historique):
             reponse = ""
         elif "exporter" in speciales:
             reponse = "J'exporte le clip en MP4, je te préviens quand c'est prêt."
+        elif any(isinstance(s, tuple) and s[0] == "corriger_mot" for s in speciales):
+            reponse = ""   # le studio écrit le vrai résultat (combien de mots corrigés)
         elif any(isinstance(s, tuple) for s in speciales):
             reponse = "Je fouille la vidéo pour te trouver un nouveau passage, ça peut prendre quelques minutes."
         else:

@@ -99,7 +99,7 @@ def _extract_audio(video_path: str, tmp_dir: str, log, debut=None, fin=None) -> 
 
 
 def transcribe_video(video_path: str, model_size: str = "small", log=print, device="cpu", compute="int8",
-                     beam=None, debut=None, fin=None):
+                     beam=None, debut=None, fin=None, sur_segment=None, langue=None):
     """
     Transcrit la vidéo.
 
@@ -107,13 +107,16 @@ def transcribe_video(video_path: str, model_size: str = "small", log=print, devi
         segments : liste de dicts {start, end, text, words: [{start, end, text}]}
         langue   : code de la langue détectée (« fr », « en »…)
     `log` peut lever une exception pour interrompre la transcription (bouton Arrêter).
+    `sur_segment(segment, langue)` est appelé à chaque phrase transcrite : sert à enregistrer au fur et à
+    mesure, pour reprendre là où on s'était arrêté si l'appli est fermée en cours de route.
+    `langue` : langue déjà connue (reprise) — sinon Whisper la détecte.
     """
     tmp_dir = tempfile.mkdtemp(prefix="studio_audio_")
     decalage = float(debut or 0)   # transcription d'une partie : on remet les temps dans la vidéo entière
     try:
         audio_path = _extract_audio(video_path, tmp_dir, log, debut, fin)
         try:
-            return _transcrire(audio_path, model_size, log, device, compute, beam, decalage)
+            return _transcrire(audio_path, model_size, log, device, compute, beam, decalage, sur_segment, langue)
         except Exception as e:  # noqa: BLE001
             # « Arrêter » cliqué, ou vrai problème de modèle : on ne relance surtout pas sur le processeur
             if device == "cpu" or type(e).__name__ == "Arret" or (isinstance(e, RuntimeError) and "prêt" in str(e)):
@@ -121,12 +124,13 @@ def transcribe_video(video_path: str, model_size: str = "small", log=print, devi
             # souci avec la carte graphique (pilote, mémoire…) : on refait tout sur le processeur
             print("Transcription sur carte graphique impossible, retour au processeur :", repr(e), flush=True)
             log("  La carte graphique n'a pas pu servir : transcription sur le processeur…")
-            return _transcrire(audio_path, "small" if model_size != "base" else "base", log, "cpu", "int8", 1, decalage)
+            return _transcrire(audio_path, "small" if model_size != "base" else "base", log, "cpu", "int8", 1,
+                               decalage, sur_segment, langue)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def _transcrire(audio_path, model_size, log, device, compute, beam, decalage):
+def _transcrire(audio_path, model_size, log, device, compute, beam, decalage, sur_segment=None, langue=None):
     from faster_whisper import WhisperModel
 
     log(f"  Chargement du modèle de transcription « {model_size} » ({'carte graphique' if device == 'cuda' else 'processeur'})...")
@@ -146,7 +150,7 @@ def _transcrire(audio_path, model_size, log, device, compute, beam, decalage):
     segments_raw, info = model.transcribe(
         audio_path, beam_size=beam, word_timestamps=True, vad_filter=True,
         # sans ça, Whisper peut répéter la même phrase en boucle sur de la musique
-        condition_on_previous_text=False,
+        condition_on_previous_text=False, language=langue or None,
     )
     segments, lignes = [], []
     duree = info.duration or 0
@@ -167,6 +171,8 @@ def _transcrire(audio_path, model_size, log, device, compute, beam, decalage):
                 continue   # même phrase répétée à la suite = hallucination
             segments.append({"start": start, "end": end, "text": text, "words": words})
             lignes.append(f"[{start:.2f}s -> {end:.2f}s] {text}")
+            if sur_segment:
+                sur_segment(segments[-1], info.language or "fr")
 
     parle = segments[-1]["end"] - segments[0]["start"] if segments else 0
     log(f"  Langue détectée : {info.language} | parole détectée sur ~{parle:.0f}s")

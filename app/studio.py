@@ -48,7 +48,7 @@ import vision  # noqa: E402
 from analyze import find_best_clips  # noqa: E402
 from transcribe import transcribe_video, get_video_duration, a_du_son, codec_video as montage_codec  # noqa: E402
 
-VERSION = "4.0"
+VERSION = "4.1"
 NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FORMATS_LISIBLES = (".mp4", ".m4v", ".webm", ".mov")
 CODECS_LISIBLES = ("h264", "vp8", "vp9", "av1")   # ce que le lecteur d'Edge sait afficher sans extension
@@ -62,6 +62,7 @@ verrou_jobs = threading.Lock()
 verrou_lourd = threading.Lock()          # une seule transcription/analyse à la fois (PC modeste)
 verrou_miniatures = threading.Semaphore(2)
 TACHES_IA = ("analyse", "nouveau_clip", "titres")
+SAUVEGARDE_TRANSCRIPTION = 20   # s : la transcription en cours est enregistrée au moins aussi souvent
 
 
 class Arret(Exception):
@@ -237,6 +238,17 @@ def lancer_job(pid, type_, fonction, cid=None, etape=""):
 
     threading.Thread(target=corps, daemon=True).start()
     return job
+
+
+def _suite_apres(seg, reprise):
+    """Partie d'une phrase qui tombe APRÈS une coupure de transcription (ou None).
+    On découpe au mot près : jeter la phrase entière perdrait la fin de celle qui était en cours."""
+    if seg["start"] >= reprise - 0.05:
+        return seg
+    mots = [w for w in seg.get("words") or [] if w["start"] >= reprise - 0.02]
+    if not mots:
+        return None
+    return {"start": mots[0]["start"], "end": seg["end"], "text": " ".join(w["text"] for w in mots), "words": mots}
 
 
 def _texte_horodate(segments):
@@ -472,21 +484,53 @@ def job_analyse(pid):
 
                 if not p.get("transcrit"):
                     job["etape"] = "Transcription de la vidéo"
+                    # Reprise : si l'appli a été fermée pendant la transcription, on repart de là où on en était
+                    partiel = p.get("transcription_partielle") or {}
+                    deja = list(partiel.get("segments") or [])
+                    reprise = float(partiel.get("jusqu_a") or 0) if deja else 0.0
+                    debut_t = p.get("debut_zone")
+                    if reprise:
+                        debut_t = max(float(debut_t or 0), reprise - 1.0)
+                    duree_totale = p.get("duree") or get_video_duration(p["source"]) or 0
+                    fin_t = p.get("fin_zone") or duree_totale
+                    nouveaux, derniere_sauvegarde = [], [time.time()]
+
+                    def sur_segment(seg, langue_vue):
+                        if reprise:
+                            seg = _suite_apres(seg, reprise)   # ce qui était déjà transcrit avant la coupure saute
+                            if seg is None:
+                                return
+                        nouveaux.append(seg)
+                        if time.time() - derniere_sauvegarde[0] >= SAUVEGARDE_TRANSCRIPTION:   # travail mis à l'abri
+                            derniere_sauvegarde[0] = time.time()
+                            with verrou:
+                                p["transcription_partielle"] = {"segments": deja + nouveaux, "jusqu_a": seg["end"],
+                                                                "langue": langue_vue}
+                                sauver(p)
 
                     def log_transcription(msg):
                         _surveiller(job)
                         job["message"] = msg.strip()
+                        if reprise:
+                            job["message"] = f"Reprise à {int(reprise // 60)} min {int(reprise % 60):02d} — " + job["message"]
                         m = re.search(r"(\d+) % transcrit", msg)
                         if m:
-                            job["pct"] = base_transcription + int(int(m.group(1)) * (66 - base_transcription) / 100)
+                            fait = int(m.group(1)) / 100
+                            if reprise and fin_t and fin_t > (debut_t or 0):   # avancement sur TOUTE la vidéo
+                                fait = ((debut_t or 0) + fait * (fin_t - (debut_t or 0))) / fin_t
+                            job["pct"] = base_transcription + int(fait * (66 - base_transcription))
                     job["pct"] = base_transcription
                     # Carte graphique NVIDIA si possible, sinon processeur (modèle selon la mémoire du PC)
                     taille, appareil, precision, largeur = acceleration.choix_transcription(
                         modele_ia.ram_go(), p.get("duree") or get_video_duration(p["source"]))
                     segments, _, langue = transcribe_video(
                         p["source"], model_size=taille, log=log_transcription, device=appareil, compute=precision,
-                        beam=largeur, debut=p.get("debut_zone"), fin=p.get("fin_zone"))
+                        beam=largeur, debut=debut_t, fin=p.get("fin_zone"), sur_segment=sur_segment,
+                        langue=partiel.get("langue") if reprise else None)
+                    if reprise:
+                        segments = deja + [x for x in (_suite_apres(s, reprise) for s in segments) if x]
                     p["segments"], p["langue"], p["transcrit"] = segments, langue, True
+                    p.pop("transcription_partielle", None)
                     p["duree"] = get_video_duration(p["source"]) or (segments[-1]["end"] if segments else 0)
                     sauver(p)
 
@@ -1000,6 +1044,34 @@ def modifier_clip(pid, cid):
     return jsonify(vue)
 
 
+def _clips_touches(p, changes):
+    """Les clips où un mot a changé : leur MP4 déjà exporté n'est plus à jour."""
+    for c in p["clips"]:
+        if any(a - 0.05 <= t <= b + 0.05 for t, _ in changes for a, b in montage.passages_du_clip(c)):
+            c["exporte"] = None
+
+
+@app.post("/api/projets/<pid>/mots")
+def corriger_mot(pid):
+    """Corrige un mot mal transcrit : un seul (instant du mot), ou partout (« de »)."""
+    d = request.get_json(force=True)
+    par = (d.get("par") or "").strip()[:60]
+    if not par:
+        return jsonify({"erreur": "Écris le bon mot."}), 400
+    with verrou:
+        p = charger(pid)
+        segs = p.get("segments", [])
+        ancien = None
+        if d.get("instant") is not None:
+            ancien = next((w["text"] for s in segs for w in s.get("words") or []
+                           if abs(float(w["start"]) - float(d["instant"])) <= 0.03), None)
+        changes = assistant.remplacer_mot(segs, par, d.get("instant"), d.get("de"))
+        _clips_touches(p, changes)
+        sauver(p)
+        autres = assistant.compter_mot(segs, ancien) if ancien else 0
+    return jsonify({"changes": [{"instant": t, "texte": x} for t, x in changes], "ancien": ancien, "autres": autres})
+
+
 @app.post("/api/projets/<pid>/clips/<cid>/appliquer-a-tous")
 def appliquer_a_tous(pid, cid):
     """Recopie l'habillage du clip (sous-titres, cadrage, titre à l'écran) sur tous les autres."""
@@ -1140,6 +1212,15 @@ def chat(pid):
                 if autre is not c and communes:
                     assistant.appliquer(p, autre, copy.deepcopy(communes))
                     autre["exporte"] = None
+        for s in speciales:
+            if isinstance(s, tuple) and s[0] == "corriger_mot":
+                changes = assistant.remplacer_mot(p.get("segments", []), s[2], de=s[1])
+                _clips_touches(p, changes)
+                resultat = (f"C'est corrigé : « {s[1]} » devient « {s[2]} » dans les sous-titres "
+                            f"({len(changes)} fois dans la vidéo)." if changes else
+                            f"Je n'ai trouvé « {s[1]} » nulle part dans les sous-titres. Vérifie l'orthographe exacte "
+                            "du mot tel qu'il apparaît, ou double-clique dessus dans l'aperçu pour le corriger.")
+                reponse = resultat + (" " + reponse if reponse.strip() else "")
         dire(p, reponse.strip() or "C'est noté.", cid)
         sauver(p)
     propositions = None
